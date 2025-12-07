@@ -20,8 +20,6 @@ const (
 	openRouterModelEnvVar  = "OPENROUTER_MODEL"
 )
 
-// SetOpenRouterURLForTest overrides the OpenRouter endpoint and returns a restore func.
-// Intended for tests where a local httptest server is used.
 func SetOpenRouterURLForTest(url string) func() {
 	prev := openRouterURL
 	openRouterURL = url
@@ -49,8 +47,6 @@ type chatResponse struct {
 	Choices []chatChoice `json:"choices"`
 }
 
-// UpdateTranscript asks OpenRouter to merge the current transcript with a new literal chunk
-// and return the updated, natural-sounding transcript.
 func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 	newLiteral = strings.TrimSpace(newLiteral)
 	if newLiteral == "" {
