@@ -208,6 +208,16 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 				job.ProcessedBatches++
 			})
 		} else {
+			literalText = strings.TrimSpace(literalText)
+			if shouldSkipLiteral(literalText) {
+				hc.log.Info("literal text indicates no update for batch", "job_id", jobID, "batch_num", i+1)
+				hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
+					job.SuccessfulBatches++
+					job.ProcessedBatches++
+				})
+				continue
+			}
+
 			// Trim context and update with OpenRouter
 			trimmedContext := hc.trimContext(transcriptContext, 1000)
 			updatedTranscript, err := hc.updateTranscriptWithContext(trimmedContext, literalText)

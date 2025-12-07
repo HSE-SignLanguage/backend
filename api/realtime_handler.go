@@ -189,12 +189,19 @@ func (hc *HandlersConfig) sendFramesToAPI(ctx context.Context, frames [][]byte, 
 		return
 	}
 
+	literalText = strings.TrimSpace(literalText)
 	if literalText == "" {
 		hc.log.Warn("API returned empty text")
 		return
 	}
 
-	trimmedContext := hc.trimContext(*transcriptContext, maxContextChars)
+	if shouldSkipLiteral(literalText) {
+		hc.log.Info("literal text indicates no update, skipping send")
+		return
+	}
+
+	previousTranscript := *transcriptContext
+	trimmedContext := hc.trimContext(previousTranscript, maxContextChars)
 
 	updatedTranscript, err := hc.updateTranscriptWithContext(trimmedContext, literalText)
 	if err != nil {
@@ -204,12 +211,18 @@ func (hc *HandlersConfig) sendFramesToAPI(ctx context.Context, frames [][]byte, 
 
 	*transcriptContext = updatedTranscript
 
-	response := WebSocketMessage{Text: updatedTranscript}
+	newSegment := extractNewSegment(previousTranscript, updatedTranscript)
+	if strings.TrimSpace(newSegment) == "" {
+		hc.log.Debug("no new transcript segment to send")
+		return
+	}
+
+	response := WebSocketMessage{Text: newSegment}
 	if err := hc.sendTextToClient(ctx, c, writeMu, response); err != nil {
 		hc.log.Error("failed to send text to websocket client", "error", err)
 	}
 
-	hc.log.Info("successfully processed and sent transcript", "context_length", len(updatedTranscript))
+	hc.log.Info("successfully processed and sent transcript segment", "segment_length", len(newSegment))
 }
 
 func (hc *HandlersConfig) trimContext(context string, maxChars int) string {
@@ -285,4 +298,38 @@ func combineTranscript(context, literal string) string {
 	default:
 		return context + " " + literal
 	}
+}
+
+func shouldSkipLiteral(text string) bool {
+	return strings.EqualFold(strings.TrimSpace(text), "no")
+}
+
+func extractNewSegment(previous, updated string) string {
+	if updated == "" {
+		return ""
+	}
+	if previous == "" {
+		return updated
+	}
+
+	maxOverlap := min(len(previous), len(updated))
+	overlap := 0
+	for i := maxOverlap; i > 0; i-- {
+		if previous[len(previous)-i:] == updated[:i] {
+			overlap = i
+			break
+		}
+	}
+
+	if len(updated) > overlap {
+		return updated[overlap:]
+	}
+	return ""
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
