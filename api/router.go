@@ -16,6 +16,7 @@ func NewRouter(log *logger.MultiLogger) *chi.Mux {
 
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
 	r.Use(httprate.Limit(
 		20,
 		5*time.Second,
@@ -33,7 +34,7 @@ func NewRouter(log *logger.MultiLogger) *chi.Mux {
 	r.Get("/socket", handlers.VideoSocketHandler)
 	r.Post("/upload", handlers.VideoUploadHandler)
 	r.Get("/job/{id}", handlers.GetJobStatus)
-	r.Get("/jobs", handlers.ListJobs) // Debug endpoint
+	r.Get("/jobs", handlers.ListJobs)
 
 	return r
 }

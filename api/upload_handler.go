@@ -262,11 +262,20 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 // @Router /job/{id} [get]
 func (hc *HandlersConfig) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "id")
-	hc.log.Info("getting job status", "job_id", jobID, "request_path", r.URL.Path)
+	
+	// Debug logging
+	urlParams := chi.RouteContext(r.Context()).URLParams
+	hc.log.Info("getting job status", 
+		"job_id", jobID, 
+		"request_path", r.URL.Path,
+		"request_url", r.URL.String(),
+		"full_url", r.Host + r.RequestURI,
+		"url_params_keys", urlParams.Keys,
+		"url_params_values", urlParams.Values)
 
 	job, exists := hc.jobManager.GetJob(jobID)
 	if !exists {
-		hc.log.Error("job not found", "job_id", jobID)
+		hc.log.Error("job not found", "job_id", jobID, "all_jobs_count", len(hc.jobManager.GetAllJobs()))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "job not found"})
