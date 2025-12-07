@@ -14,10 +14,8 @@ import (
 )
 
 type HandlersConfig struct {
-	log          *logger.MultiLogger
-	mu           sync.Mutex
-	framesBuffer [][]byte
-	demoAPIURL   string
+	log        *logger.MultiLogger
+	demoAPIURL string
 }
 
 func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
@@ -28,10 +26,14 @@ func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
 	}
 
 	return &HandlersConfig{
-		log:          log,
-		framesBuffer: make([][]byte, 0, 32),
-		demoAPIURL:   demoAPIURL,
+		log:        log,
+		demoAPIURL: demoAPIURL,
 	}
+}
+
+// WebSocketMessage represents the payload sent back to clients over the socket.
+type WebSocketMessage struct {
+	Text string `json:"text"`
 }
 
 // HealthCheck godoc
@@ -48,11 +50,11 @@ func (hc *HandlersConfig) HealthCheck(w http.ResponseWriter, r *http.Request) {
 
 // VideoSocketHandler godoc
 // @Summary WebSocket endpoint for video frame streaming
-// @Description Establishes a WebSocket connection for receiving video frames. Frames are buffered and sent in batches of 32 to the processing API
+// @Description Establishes a WebSocket connection for receiving video frames. Frames are buffered and sent in batches of 32 to the processing API and the resulting text is streamed back to the client as JSON messages
 // @Tags websocket
 // @Accept octet-stream
 // @Produce json
-// @Success 101 {string} string "Switching Protocols"
+// @Success 101 {object} api.WebSocketMessage "WebSocket response with extracted text"
 // @Failure 400 {string} string "Bad Request - Failed to accept websocket"
 // @Router /socket [get]
 func (hc *HandlersConfig) VideoSocketHandler(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +79,9 @@ func (hc *HandlersConfig) VideoSocketHandler(w http.ResponseWriter, r *http.Requ
 }
 
 func (hc *HandlersConfig) handleFrameStream(ctx context.Context, c *websocket.Conn) {
+	framesBuffer := make([][]byte, 0, 32)
+	var writeMu sync.Mutex
+
 	for {
 		typ, data, err := c.Read(ctx)
 
@@ -96,24 +101,18 @@ func (hc *HandlersConfig) handleFrameStream(ctx context.Context, c *websocket.Co
 
 		hc.log.Info("received frame", "size", len(data))
 
-		hc.mu.Lock()
-		hc.framesBuffer = append(hc.framesBuffer, data)
-		bufferLen := len(hc.framesBuffer)
-		hc.mu.Unlock()
-
-		if bufferLen >= 32 {
-			hc.mu.Lock()
+		framesBuffer = append(framesBuffer, data)
+		if len(framesBuffer) >= 32 {
 			framesToSend := make([][]byte, 32)
-			copy(framesToSend, hc.framesBuffer[:32])
-			hc.framesBuffer = hc.framesBuffer[32:]
-			hc.mu.Unlock()
+			copy(framesToSend, framesBuffer[:32])
+			framesBuffer = framesBuffer[32:]
 
-			go hc.sendFramesToAPI(framesToSend)
+			go hc.sendFramesToAPI(ctx, framesToSend, c, &writeMu)
 		}
 	}
 }
 
-func (hc *HandlersConfig) sendFramesToAPI(frames [][]byte) {
+func (hc *HandlersConfig) sendFramesToAPI(ctx context.Context, frames [][]byte, c *websocket.Conn, writeMu *sync.Mutex) {
 	hc.log.Info("sending batch of frames to demo API", "count", len(frames), "url", hc.demoAPIURL)
 
 	payload := map[string]interface{}{
@@ -127,10 +126,10 @@ func (hc *HandlersConfig) sendFramesToAPI(frames [][]byte) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	requestCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", hc.demoAPIURL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(requestCtx, "POST", hc.demoAPIURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		hc.log.Error("failed to create request", "error", err)
 		return
@@ -151,5 +150,33 @@ func (hc *HandlersConfig) sendFramesToAPI(frames [][]byte) {
 		return
 	}
 
-	hc.log.Info("successfully sent frames to demo API", "status", resp.StatusCode)
+	var apiResp WebSocketMessage
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		hc.log.Error("failed to decode demo API response", "error", err)
+		return
+	}
+
+	if apiResp.Text == "" {
+		hc.log.Warn("demo API returned empty text field")
+		return
+	}
+
+	if err := hc.sendTextToClient(ctx, c, writeMu, apiResp); err != nil {
+		hc.log.Error("failed to send text to websocket client", "error", err)
+		return
+	}
+
+	hc.log.Info("successfully sent frames to demo API and forwarded response", "status", resp.StatusCode)
+}
+
+func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Conn, writeMu *sync.Mutex, message WebSocketMessage) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
+	data, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+
+	return c.Write(ctx, websocket.MessageText, data)
 }

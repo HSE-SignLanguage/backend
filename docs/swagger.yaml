@@ -6,9 +6,6 @@ definitions:
       text:
         example: Sample extracted text from frames
         type: string
-      timestamp:
-        example: 1701955200
-        type: integer
     type: object
 host: localhost:8080
 info:

@@ -82,10 +82,6 @@ const docTemplate = `{
                 "text": {
                     "type": "string",
                     "example": "Sample extracted text from frames"
-                },
-                "timestamp": {
-                    "type": "integer",
-                    "example": 1701955200
                 }
             }
         }
