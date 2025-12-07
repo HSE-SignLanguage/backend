@@ -263,15 +263,20 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 func (hc *HandlersConfig) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "id")
 	
-	// Debug logging
-	urlParams := chi.RouteContext(r.Context()).URLParams
+	// Debug logging - safely access route context
+	rctx := chi.RouteContext(r.Context())
+	var paramKeys, paramValues []string
+	if rctx != nil && rctx.URLParams.Keys != nil {
+		paramKeys = rctx.URLParams.Keys
+		paramValues = rctx.URLParams.Values
+	}
+	
 	hc.log.Info("getting job status", 
 		"job_id", jobID, 
 		"request_path", r.URL.Path,
 		"request_url", r.URL.String(),
-		"full_url", r.Host + r.RequestURI,
-		"url_params_keys", urlParams.Keys,
-		"url_params_values", urlParams.Values)
+		"param_keys_count", len(paramKeys),
+		"param_values_count", len(paramValues))
 
 	job, exists := hc.jobManager.GetJob(jobID)
 	if !exists {
