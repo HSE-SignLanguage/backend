@@ -17,8 +17,9 @@ import (
 var openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
 
 const (
-	openRouterAPIKeyEnvVar = "OPENROUTER_API_KEY"
-	openRouterModelEnvVar  = "OPENROUTER_MODEL"
+	openRouterAPIKeyEnvVar    = "OPENROUTER_API_KEY"
+	openRouterModelEnvVar     = "OPENROUTER_MODEL"
+	openRouterSystemPromptEnv = "OPENROUTER_SYSTEM_PROMPT"
 )
 
 func SetOpenRouterURLForTest(url string) func() {
@@ -68,6 +69,12 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 		return "", err
 	}
 
+	systemPrompt, err := config.GetEnv(openRouterSystemPromptEnv)
+	if err != nil {
+		log.Printf("OpenRouter: missing system prompt (%s): %v", openRouterSystemPromptEnv, err)
+		return "", err
+	}
+
 	log.Printf("OpenRouter: preparing request (model=%s, context_len=%d, literal_len=%d)", model, len(current), len(newLiteral))
 
 	prompt := buildPrompt(currentContext, newLiteral)
@@ -75,13 +82,13 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 	reqBody := chatRequest{
 		Model: model,
 		Messages: []chatMessage{
-			// {
-			// 	Role:    "system",
-			// 	Content: "Вы преобразуете буквальную расшифровку текста на языке жестов в естественный текст. Расширьте текущую расшифровку новым фрагментом, сохраняйте естественность грамматики и языка и отвечайте полностью обновленной расшифровкой. Если текстовая часть является бессмысленной, оставьте предыдущую расшифровку без изменений. ВАЖНО: всегда пишите на русском языке.",
-			// },
+			{
+				Role:    "system",
+				Content: systemPrompt,
+			},
 			{
 				Role:    "user",
-				Content: "Вы преобразуете буквальную расшифровку текста на языке жестов в естественный текст. Расширьте текущую расшифровку новым фрагментом, сохраняйте естественность грамматики и языка и отвечайте полностью обновленной расшифровкой. Если текстовая часть является бессмысленной, оставьте предыдущую расшифровку без изменений. ВАЖНО: всегда пишите на русском языке и никогда не используй форматирование." + prompt,
+				Content: prompt,
 			},
 		},
 	}

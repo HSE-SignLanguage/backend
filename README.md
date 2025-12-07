@@ -142,6 +142,7 @@ ML_API_URL=http://localhost:9000/api/process  # Demo API endpoint for frame proc
 USE_MOCK=false                 # Enable mock mode (returns test data without calling demo API)
 OPENROUTER_API_KEY=your_key    # OpenRouter API key for transcript improvement
 OPENROUTER_MODEL=anthropic/claude-3.5-sonnet  # Model to use for transcript processing
+OPENROUTER_SYSTEM_PROMPT="You turn literal sign-language transcripts into natural text..."  # System prompt sent to OpenRouter
 USE_OPENROUTER=true            # Set to false to skip OpenRouter transcript polishing
 ```
 
@@ -157,6 +158,8 @@ The system uses a two-stage approach for transcription:
    - Preserving the original language
 
 Set `USE_OPENROUTER=false` if you only need the literal output (the backend will concatenate batches without calling OpenRouter).
+
+Customize `OPENROUTER_SYSTEM_PROMPT` to control how the polishing model behaves (language, tone, formatting rules, etc.).
 
 **Context Management:**
 - Keeps running context of up to 1000 characters

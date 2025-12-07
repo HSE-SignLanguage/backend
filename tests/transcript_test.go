@@ -26,6 +26,7 @@ func TestUpdateTranscriptReturnsCurrentWhenNewLiteralEmpty(t *testing.T) {
 func TestUpdateTranscriptMissingEnv(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "")
 	t.Setenv("OPENROUTER_MODEL", "")
+	t.Setenv("OPENROUTER_SYSTEM_PROMPT", "")
 
 	if _, err := utils.UpdateTranscript("context", "new"); err == nil {
 		t.Fatalf("expected error when env vars are missing")
@@ -74,6 +75,7 @@ func TestUpdateTranscriptSuccess(t *testing.T) {
 
 	t.Setenv("OPENROUTER_API_KEY", "test-key")
 	t.Setenv("OPENROUTER_MODEL", "test-model")
+	t.Setenv("OPENROUTER_SYSTEM_PROMPT", "You polish transcripts")
 
 	result, err := utils.UpdateTranscript("prev context", "new literal chunk")
 	if err != nil {
@@ -95,6 +97,10 @@ func TestUpdateTranscriptIntegrationOpenRouter(t *testing.T) {
 
 	if _, ok := os.LookupEnv("OPENROUTER_MODEL"); !ok {
 		t.Skip("OPENROUTER_MODEL not set; skipping integration test")
+	}
+
+	if _, ok := os.LookupEnv("OPENROUTER_SYSTEM_PROMPT"); !ok {
+		t.Skip("OPENROUTER_SYSTEM_PROMPT not set; skipping integration test")
 	}
 
 	current := "Вечером, когда солнце уже спряталось за крышами домов, Лера вышла на балкон полить свои цветы. Она делала это каждый день, но сегодня заметила кое-что необычное: на перилах лежал маленький блестящий ключ. Он был тёплым, будто его кто-то только что держал в руках. Лера огляделась — во дворе никого. Она взяла ключ, и в этот момент снизу тихо щёлкнуло. Лестничная клетка, где уже много лет был заколочен старый чердак, вдруг оказалась открытой. Дверь приоткрылась ровно настолько, чтобы пройти внутрь. Лера вдохнула поглубже. Внутри пахло пылью, но где-то вдали мерцал мягкий золотистый свет. Она шагнула внутрь. С каждой ступенькой свет становился ярче, и когда Лера добралась до самого верха, увидела на полу маленькую музыкальную шкатулку. Она была раскрыта, и из неё лилась тихая мелодия — та самая, которую мама пела ей в детстве. Лера опустилась на колени. На крышке было выгравировано: «Добро пожаловать домой». Шкатулка закрылась, свет погас, но ключ всё ещё светился в её ладони — как обещание, что чудеса всё ещё рядом. Как"
