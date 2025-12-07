@@ -44,6 +44,44 @@ const docTemplate = `{
                 }
             }
         },
+        "/job/{id}": {
+            "get": {
+                "description": "Poll this endpoint to check the status of a video processing job and retrieve results when complete\n\n**Job Status Values:**\n- ` + "`" + `queued` + "`" + `: Job created, waiting to start\n- ` + "`" + `processing` + "`" + `: Currently extracting and processing frames\n- ` + "`" + `completed` + "`" + `: All processing done, transcription available\n- ` + "`" + `failed` + "`" + `: Processing encountered an error\n\n**Response includes:**\n- Current status and progress (processed_batches / total_batches)\n- Accumulated transcription results\n- Full combined text when completed\n- Video metadata and statistics",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "video"
+                ],
+                "summary": "Get video processing job status",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Job ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Job status and results",
+                        "schema": {
+                            "$ref": "#/definitions/api.VideoJob"
+                        }
+                    },
+                    "404": {
+                        "description": "Job not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/socket": {
             "get": {
                 "description": "Establishes a WebSocket connection for receiving video frames. Send binary frames to the server, and receive text responses back.\n\n**Client Flow:**\n1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)\n2. Send video frames as binary messages (MessageBinary)\n3. Server buffers frames and sends batches of 32 to processing API\n4. Receive text responses as JSON messages (MessageText)\n\n**Response Format:**\nThe server sends back JSON text messages with the structure:\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"text\": \"extracted or processed text from the frames\"\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\nconst ws = new WebSocket('ws://localhost:8080/socket');\n\n// Send binary frame data\nws.send(frameDataBlob);\n\n// Receive text messages\nws.onmessage = (event) =\u003e {\nconst data = JSON.parse(event.data);\nconsole.log('Received text:', data.text);\n};\n` + "`" + `` + "`" + `` + "`" + `",
@@ -75,7 +113,7 @@ const docTemplate = `{
         },
         "/upload": {
             "post": {
-                "description": "Upload a video file, extract frames, and process them in batches of 32 frames. Unlike the WebSocket endpoint, this processes the entire video at once and returns a summary.\n\n**Process Flow:**\n1. Upload video file via multipart form data\n2. Server extracts frames from the video\n3. Frames are split into batches of 32\n4. Each batch is sent sequentially to the processing API\n5. Returns processing summary with statistics\n\n**Response Format:**\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"status\": \"completed\",\n\"total_frames\": 250,\n\"total_batches\": 8,\n\"successful_batches\": 8,\n\"video_info\": {\n\"fps\": 25.0,\n\"duration\": 10.0,\n\"frame_width\": 1920,\n\"frame_height\": 1080,\n\"estimated_frames\": 250\n}\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\nconst formData = new FormData();\nformData.append('video', videoFile);\nformData.append('interval', '1'); // Optional: extract every Nth frame\n\nconst response = await fetch('http://localhost:8080/upload', {\nmethod: 'POST',\nbody: formData\n});\n\nconst result = await response.json();\nconsole.log('Processing completed:', result);\n` + "`" + `` + "`" + `` + "`" + `",
+                "description": "Upload a video file and receive a job ID immediately. The video will be processed asynchronously in batches of 32 frames.\n\n**Process Flow:**\n1. Upload video file via multipart form data\n2. Receive job ID immediately (status: queued)\n3. Server processes video in background\n4. Poll /job/{id} endpoint to check status and get results\n5. When complete, full transcription is available\n\n**Immediate Response Format:**\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"job_id\": \"550e8400-e29b-41d4-a716-446655440000\",\n\"status\": \"queued\",\n\"message\": \"Video upload accepted, processing started\"\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\n// 1. Upload video\nconst formData = new FormData();\nformData.append('video', videoFile);\nconst uploadResp = await fetch('http://localhost:8080/upload', {\nmethod: 'POST',\nbody: formData\n});\nconst { job_id } = await uploadResp.json();\n\n// 2. Poll for results\nconst pollInterval = setInterval(async () =\u003e {\nconst statusResp = await fetch(` + "`" + `http://localhost:8080/job/${job_id}` + "`" + `);\nconst job = await statusResp.json();\n\nif (job.status === 'completed') {\nconsole.log('Transcription:', job.full_text);\nclearInterval(pollInterval);\n} else if (job.status === 'failed') {\nconsole.error('Processing failed:', job.error);\nclearInterval(pollInterval);\n}\n}, 2000);\n` + "`" + `` + "`" + `` + "`" + `",
                 "consumes": [
                     "multipart/form-data"
                 ],
@@ -85,7 +123,7 @@ const docTemplate = `{
                 "tags": [
                     "video"
                 ],
-                "summary": "Upload video for frame-by-frame processing",
+                "summary": "Upload video for async frame-by-frame processing",
                 "parameters": [
                     {
                         "type": "file",
@@ -102,8 +140,8 @@ const docTemplate = `{
                     }
                 ],
                 "responses": {
-                    "200": {
-                        "description": "Processing result with status and metadata",
+                    "202": {
+                        "description": "Job created and processing started",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -132,6 +170,77 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "api.JobStatus": {
+            "type": "string",
+            "enum": [
+                "queued",
+                "processing",
+                "completed",
+                "failed"
+            ],
+            "x-enum-varnames": [
+                "JobStatusQueued",
+                "JobStatusProcessing",
+                "JobStatusCompleted",
+                "JobStatusFailed"
+            ]
+        },
+        "api.VideoJob": {
+            "type": "object",
+            "properties": {
+                "completed_at": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "failed_batches": {
+                    "type": "integer"
+                },
+                "filename": {
+                    "type": "string"
+                },
+                "full_text": {
+                    "description": "Combined transcription",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "processed_batches": {
+                    "type": "integer"
+                },
+                "status": {
+                    "$ref": "#/definitions/api.JobStatus"
+                },
+                "successful_batches": {
+                    "type": "integer"
+                },
+                "total_batches": {
+                    "type": "integer"
+                },
+                "total_frames": {
+                    "type": "integer"
+                },
+                "transcription": {
+                    "description": "Accumulated text results",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "video_info": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }
+        },
         "api.WebSocketMessage": {
             "type": "object",
             "properties": {

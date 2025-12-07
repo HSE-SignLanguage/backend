@@ -29,6 +29,7 @@ func NewRouter(log *logger.MultiLogger) *chi.Mux {
 	r.Get("/health", handlers.HealthCheck)
 	r.Get("/socket", handlers.VideoSocketHandler)
 	r.Post("/upload", handlers.VideoUploadHandler)
+	r.Get("/job/{id}", handlers.GetJobStatus)
 
 	return r
 }

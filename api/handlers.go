@@ -12,15 +12,18 @@ import (
 	"streaming/config"
 	"streaming/logger"
 	"streaming/utils"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/go-chi/chi/v5"
 )
 
 type HandlersConfig struct {
 	log        *logger.MultiLogger
 	demoAPIURL string
+	jobManager *JobManager
 }
 
 func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
@@ -33,6 +36,7 @@ func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
 	return &HandlersConfig{
 		log:        log,
 		demoAPIURL: demoAPIURL,
+		jobManager: NewJobManager(),
 	}
 }
 
@@ -214,53 +218,56 @@ func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Con
 }
 
 // VideoUploadHandler godoc
-// @Summary Upload video for frame-by-frame processing
-// @Description Upload a video file, extract frames, and process them in batches of 32 frames. Unlike the WebSocket endpoint, this processes the entire video at once and returns a summary.
+// @Summary Upload video for async frame-by-frame processing
+// @Description Upload a video file and receive a job ID immediately. The video will be processed asynchronously in batches of 32 frames.
 // @Description
 // @Description **Process Flow:**
 // @Description 1. Upload video file via multipart form data
-// @Description 2. Server extracts frames from the video
-// @Description 3. Frames are split into batches of 32
-// @Description 4. Each batch is sent sequentially to the processing API
-// @Description 5. Returns processing summary with statistics
+// @Description 2. Receive job ID immediately (status: queued)
+// @Description 3. Server processes video in background
+// @Description 4. Poll /job/{id} endpoint to check status and get results
+// @Description 5. When complete, full transcription is available
 // @Description
-// @Description **Response Format:**
+// @Description **Immediate Response Format:**
 // @Description ```json
 // @Description {
-// @Description   "status": "completed",
-// @Description   "total_frames": 250,
-// @Description   "total_batches": 8,
-// @Description   "successful_batches": 8,
-// @Description   "video_info": {
-// @Description     "fps": 25.0,
-// @Description     "duration": 10.0,
-// @Description     "frame_width": 1920,
-// @Description     "frame_height": 1080,
-// @Description     "estimated_frames": 250
-// @Description   }
+// @Description   "job_id": "550e8400-e29b-41d4-a716-446655440000",
+// @Description   "status": "queued",
+// @Description   "message": "Video upload accepted, processing started"
 // @Description }
 // @Description ```
 // @Description
 // @Description **Frontend Example:**
 // @Description ```javascript
+// @Description // 1. Upload video
 // @Description const formData = new FormData();
 // @Description formData.append('video', videoFile);
-// @Description formData.append('interval', '1'); // Optional: extract every Nth frame
-// @Description
-// @Description const response = await fetch('http://localhost:8080/upload', {
+// @Description const uploadResp = await fetch('http://localhost:8080/upload', {
 // @Description   method: 'POST',
 // @Description   body: formData
 // @Description });
+// @Description const { job_id } = await uploadResp.json();
 // @Description
-// @Description const result = await response.json();
-// @Description console.log('Processing completed:', result);
+// @Description // 2. Poll for results
+// @Description const pollInterval = setInterval(async () => {
+// @Description   const statusResp = await fetch(`http://localhost:8080/job/${job_id}`);
+// @Description   const job = await statusResp.json();
+// @Description
+// @Description   if (job.status === 'completed') {
+// @Description     console.log('Transcription:', job.full_text);
+// @Description     clearInterval(pollInterval);
+// @Description   } else if (job.status === 'failed') {
+// @Description     console.error('Processing failed:', job.error);
+// @Description     clearInterval(pollInterval);
+// @Description   }
+// @Description }, 2000);
 // @Description ```
 // @Tags video
 // @Accept multipart/form-data
 // @Produce json
 // @Param video formData file true "Video file to process"
 // @Param interval formData int false "Frame extraction interval (default: 1, extract every frame)"
-// @Success 200 {object} map[string]interface{} "Processing result with status and metadata"
+// @Success 202 {object} map[string]interface{} "Job created and processing started"
 // @Failure 400 {object} map[string]string "Bad Request - Invalid file or format"
 // @Failure 500 {object} map[string]string "Internal Server Error"
 // @Router /upload [post]
@@ -288,45 +295,79 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	tempFilePath := filepath.Join(tempDir, fmt.Sprintf("%d_%s", time.Now().Unix(), header.Filename))
+	// Generate job ID
+	jobID := fmt.Sprintf("%d-%s", time.Now().UnixNano(), header.Filename)
+
+	// Save file with job ID
+	tempFilePath := filepath.Join(tempDir, fmt.Sprintf("%s_%s", jobID, header.Filename))
 	tempFile, err := os.Create(tempFilePath)
 	if err != nil {
 		hc.log.Error("failed to create temp file", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	defer func() {
-		tempFile.Close()
-		os.Remove(tempFilePath)
-	}()
 
 	if _, err := io.Copy(tempFile, file); err != nil {
+		tempFile.Close()
+		os.Remove(tempFilePath)
 		hc.log.Error("failed to save temp file", "error", err)
 		http.Error(w, "failed to save video", http.StatusInternalServerError)
 		return
 	}
 	tempFile.Close()
 
-	hc.log.Info("extracting frames from video", "path", tempFilePath)
+	// Create job
+	_ = hc.jobManager.CreateJob(jobID, header.Filename)
+
+	// Get interval parameter
+	interval := 1
+	if intervalStr := r.FormValue("interval"); intervalStr != "" {
+		fmt.Sscanf(intervalStr, "%d", &interval)
+	}
+
+	// Start async processing
+	go hc.processVideoAsync(jobID, tempFilePath, interval)
+
+	// Return immediately with job ID
+	response := map[string]interface{}{
+		"job_id":  jobID,
+		"status":  "queued",
+		"message": "Video upload accepted, processing started",
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(response)
+
+	hc.log.Info("video upload accepted", "job_id", jobID)
+}
+
+// processVideoAsync processes video in the background
+func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval int) {
+	defer os.Remove(tempFilePath) // Clean up temp file when done
+
+	hc.log.Info("starting video processing", "job_id", jobID)
+
+	// Update job status to processing
+	hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
+		job.Status = JobStatusProcessing
+	})
+
+	// Extract frames
 	extractor, err := utils.NewVideoFrameExtractor(tempFilePath)
 	if err != nil {
-		hc.log.Error("failed to create video extractor", "error", err)
-		http.Error(w, "failed to process video", http.StatusInternalServerError)
+		hc.log.Error("failed to create video extractor", "job_id", jobID, "error", err)
+		hc.jobManager.FailJob(jobID, fmt.Sprintf("failed to process video: %v", err))
 		return
 	}
 	defer extractor.Close()
 
 	// Get video info
 	videoInfo := extractor.GetVideoInfo()
-	hc.log.Info("video info", "info", videoInfo)
+	hc.log.Info("video info", "job_id", jobID, "info", videoInfo)
 
-	// Extract frames (optionally with interval)
+	// Extract frames with interval
 	var frames [][]byte
-	interval := 1 // Default: extract every frame
-	if intervalStr := r.FormValue("interval"); intervalStr != "" {
-		fmt.Sscanf(intervalStr, "%d", &interval)
-	}
-
 	if interval > 1 {
 		frames, err = extractor.ExtractFramesWithInterval(interval)
 	} else {
@@ -334,47 +375,135 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 	}
 
 	if err != nil {
-		hc.log.Error("failed to extract frames", "error", err)
-		http.Error(w, "failed to extract frames", http.StatusInternalServerError)
+		hc.log.Error("failed to extract frames", "job_id", jobID, "error", err)
+		hc.jobManager.FailJob(jobID, fmt.Sprintf("failed to extract frames: %v", err))
 		return
 	}
 
-	hc.log.Info("extracted frames", "count", len(frames))
+	hc.log.Info("extracted frames", "job_id", jobID, "count", len(frames))
 
-	// Split frames into batches of 32
+	// Split frames into batches
 	batches := utils.BatchFrames(frames, 32)
-	hc.log.Info("created batches", "batch_count", len(batches))
+
+	// Update job with batch info
+	hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
+		job.TotalFrames = len(frames)
+		job.TotalBatches = len(batches)
+		job.VideoInfo = videoInfo
+	})
+
+	hc.log.Info("created batches", "job_id", jobID, "batch_count", len(batches))
 
 	// Process batches sequentially
-	successCount := 0
 	for i, batch := range batches {
-		hc.log.Info("processing batch", "batch_num", i+1, "batch_size", len(batch))
+		hc.log.Info("processing batch", "job_id", jobID, "batch_num", i+1, "batch_size", len(batch))
 
-		if err := hc.sendFrameBatchToDemoAPI(batch); err != nil {
-			hc.log.Error("failed to send batch to demo API", "batch_num", i+1, "error", err)
-			// Continue processing remaining batches
+		text, err := hc.sendFrameBatchToDemoAPIWithResponse(batch)
+		if err != nil {
+			hc.log.Error("failed to send batch to demo API", "job_id", jobID, "batch_num", i+1, "error", err)
+			hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
+				job.FailedBatches++
+				job.ProcessedBatches++
+			})
 		} else {
-			successCount++
+			hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
+				job.SuccessfulBatches++
+				job.ProcessedBatches++
+			})
+			// Add transcription result if we got text back
+			if text != "" {
+				hc.jobManager.AddTranscriptionResult(jobID, text)
+			}
 		}
 
-		// Small delay between batches to avoid overwhelming the API
+		// Small delay between batches
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// Send response
-	response := map[string]interface{}{
-		"status":             "completed",
-		"total_frames":       len(frames),
-		"total_batches":      len(batches),
-		"successful_batches": successCount,
-		"video_info":         videoInfo,
+	// Complete the job with full transcription
+	job, _ := hc.jobManager.GetJob(jobID)
+	fullText := strings.Join(job.Transcription, " ")
+	hc.jobManager.CompleteJob(jobID, fullText)
+
+	hc.log.Info("video processing completed", "job_id", jobID, "total_frames", len(frames), "successful_batches", job.SuccessfulBatches)
+}
+
+// GetJobStatus godoc
+// @Summary Get video processing job status
+// @Description Poll this endpoint to check the status of a video processing job and retrieve results when complete
+// @Description
+// @Description **Job Status Values:**
+// @Description - `queued`: Job created, waiting to start
+// @Description - `processing`: Currently extracting and processing frames
+// @Description - `completed`: All processing done, transcription available
+// @Description - `failed`: Processing encountered an error
+// @Description
+// @Description **Response includes:**
+// @Description - Current status and progress (processed_batches / total_batches)
+// @Description - Accumulated transcription results
+// @Description - Full combined text when completed
+// @Description - Video metadata and statistics
+// @Tags video
+// @Produce json
+// @Param id path string true "Job ID"
+// @Success 200 {object} api.VideoJob "Job status and results"
+// @Failure 404 {object} map[string]string "Job not found"
+// @Router /job/{id} [get]
+func (hc *HandlersConfig) GetJobStatus(w http.ResponseWriter, r *http.Request) {
+	jobID := chi.URLParam(r, "id")
+
+	job, exists := hc.jobManager.GetJob(jobID)
+	if !exists {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(job)
+}
 
-	hc.log.Info("video processing completed", "total_frames", len(frames), "successful_batches", successCount)
+// sendFrameBatchToDemoAPIWithResponse sends frames and returns the text response
+func (hc *HandlersConfig) sendFrameBatchToDemoAPIWithResponse(frames [][]byte) (string, error) {
+	payload := map[string]interface{}{
+		"frames": frames,
+		"count":  len(frames),
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal frames: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", hc.demoAPIURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return "", fmt.Errorf("demo API returned error status: %d", resp.StatusCode)
+	}
+
+	// Try to parse response for text
+	var apiResp WebSocketMessage
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		hc.log.Warn("failed to decode demo API response", "error", err)
+		return "", nil // Not a fatal error
+	}
+
+	hc.log.Info("successfully sent batch to demo API", "status", resp.StatusCode, "text_length", len(apiResp.Text))
+	return apiResp.Text, nil
 }
 
 // sendFrameBatchToDemoAPI sends a batch of frames to the demo API

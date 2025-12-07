@@ -1,5 +1,55 @@
 basePath: /
 definitions:
+  api.JobStatus:
+    enum:
+    - queued
+    - processing
+    - completed
+    - failed
+    type: string
+    x-enum-varnames:
+    - JobStatusQueued
+    - JobStatusProcessing
+    - JobStatusCompleted
+    - JobStatusFailed
+  api.VideoJob:
+    properties:
+      completed_at:
+        type: string
+      created_at:
+        type: string
+      error:
+        type: string
+      failed_batches:
+        type: integer
+      filename:
+        type: string
+      full_text:
+        description: Combined transcription
+        type: string
+      id:
+        type: string
+      processed_batches:
+        type: integer
+      status:
+        $ref: '#/definitions/api.JobStatus'
+      successful_batches:
+        type: integer
+      total_batches:
+        type: integer
+      total_frames:
+        type: integer
+      transcription:
+        description: Accumulated text results
+        items:
+          type: string
+        type: array
+      updated_at:
+        type: string
+      video_info:
+        additionalProperties: true
+        type: object
+    type: object
   api.WebSocketMessage:
     properties:
       text:
@@ -33,6 +83,44 @@ paths:
       summary: Health check endpoint
       tags:
       - health
+  /job/{id}:
+    get:
+      description: |-
+        Poll this endpoint to check the status of a video processing job and retrieve results when complete
+
+        **Job Status Values:**
+        - `queued`: Job created, waiting to start
+        - `processing`: Currently extracting and processing frames
+        - `completed`: All processing done, transcription available
+        - `failed`: Processing encountered an error
+
+        **Response includes:**
+        - Current status and progress (processed_batches / total_batches)
+        - Accumulated transcription results
+        - Full combined text when completed
+        - Video metadata and statistics
+      parameters:
+      - description: Job ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Job status and results
+          schema:
+            $ref: '#/definitions/api.VideoJob'
+        "404":
+          description: Job not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get video processing job status
+      tags:
+      - video
   /socket:
     get:
       consumes:
@@ -86,45 +174,48 @@ paths:
       consumes:
       - multipart/form-data
       description: |-
-        Upload a video file, extract frames, and process them in batches of 32 frames. Unlike the WebSocket endpoint, this processes the entire video at once and returns a summary.
+        Upload a video file and receive a job ID immediately. The video will be processed asynchronously in batches of 32 frames.
 
         **Process Flow:**
         1. Upload video file via multipart form data
-        2. Server extracts frames from the video
-        3. Frames are split into batches of 32
-        4. Each batch is sent sequentially to the processing API
-        5. Returns processing summary with statistics
+        2. Receive job ID immediately (status: queued)
+        3. Server processes video in background
+        4. Poll /job/{id} endpoint to check status and get results
+        5. When complete, full transcription is available
 
-        **Response Format:**
+        **Immediate Response Format:**
         ```json
         {
-        "status": "completed",
-        "total_frames": 250,
-        "total_batches": 8,
-        "successful_batches": 8,
-        "video_info": {
-        "fps": 25.0,
-        "duration": 10.0,
-        "frame_width": 1920,
-        "frame_height": 1080,
-        "estimated_frames": 250
-        }
+        "job_id": "550e8400-e29b-41d4-a716-446655440000",
+        "status": "queued",
+        "message": "Video upload accepted, processing started"
         }
         ```
 
         **Frontend Example:**
         ```javascript
+        // 1. Upload video
         const formData = new FormData();
         formData.append('video', videoFile);
-        formData.append('interval', '1'); // Optional: extract every Nth frame
-
-        const response = await fetch('http://localhost:8080/upload', {
+        const uploadResp = await fetch('http://localhost:8080/upload', {
         method: 'POST',
         body: formData
         });
+        const { job_id } = await uploadResp.json();
 
-        const result = await response.json();
-        console.log('Processing completed:', result);
+        // 2. Poll for results
+        const pollInterval = setInterval(async () => {
+        const statusResp = await fetch(`http://localhost:8080/job/${job_id}`);
+        const job = await statusResp.json();
+
+        if (job.status === 'completed') {
+        console.log('Transcription:', job.full_text);
+        clearInterval(pollInterval);
+        } else if (job.status === 'failed') {
+        console.error('Processing failed:', job.error);
+        clearInterval(pollInterval);
+        }
+        }, 2000);
         ```
       parameters:
       - description: Video file to process
@@ -139,8 +230,8 @@ paths:
       produces:
       - application/json
       responses:
-        "200":
-          description: Processing result with status and metadata
+        "202":
+          description: Job created and processing started
           schema:
             additionalProperties: true
             type: object
@@ -156,7 +247,7 @@ paths:
             additionalProperties:
               type: string
             type: object
-      summary: Upload video for frame-by-frame processing
+      summary: Upload video for async frame-by-frame processing
       tags:
       - video
 schemes:
