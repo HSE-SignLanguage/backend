@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -50,18 +51,23 @@ type chatResponse struct {
 func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 	newLiteral = strings.TrimSpace(newLiteral)
 	if newLiteral == "" {
+		log.Println("OpenRouter: literal chunk empty, skipping")
 		return "", nil
 	}
 
 	apiKey, err := config.GetEnv(openRouterAPIKeyEnvVar)
 	if err != nil {
+		log.Printf("OpenRouter: missing API key (%s): %v", openRouterAPIKeyEnvVar, err)
 		return "", err
 	}
 
 	model, err := config.GetEnv(openRouterModelEnvVar)
 	if err != nil {
+		log.Printf("OpenRouter: missing model (%s): %v", openRouterModelEnvVar, err)
 		return "", err
 	}
+
+	log.Printf("OpenRouter: preparing request (model=%s, context_len=%d, literal_len=%d)", model, len(strings.TrimSpace(currentContext)), len(newLiteral))
 
 	prompt := buildPrompt(currentContext, newLiteral)
 
@@ -98,27 +104,34 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
+		log.Printf("OpenRouter: request failed: %v", err)
 		return "", fmt.Errorf("call openrouter: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("OpenRouter: non-200 status %d", resp.StatusCode)
 		return "", fmt.Errorf("openrouter returned status %d", resp.StatusCode)
 	}
 
 	var parsed chatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		log.Printf("OpenRouter: decode error: %v", err)
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 
 	if len(parsed.Choices) == 0 {
+		log.Println("OpenRouter: response missing choices")
 		return "", errors.New("openrouter response missing choices")
 	}
 
 	updated := strings.TrimSpace(parsed.Choices[0].Message.Content)
 	if updated == "" {
+		log.Println("OpenRouter: response contained empty chunk")
 		return "", errors.New("empty transcript received from openrouter")
 	}
+
+	log.Printf("OpenRouter: success (improved_len=%d)", len(updated))
 
 	return updated, nil
 }
