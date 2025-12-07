@@ -86,7 +86,7 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 		},
 	}
 
-	log.Printf("OpenRouter: sending request payload")
+	log.Printf("OpenRouter: sending request payload: %v", reqBody)
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
