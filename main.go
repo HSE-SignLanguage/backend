@@ -11,7 +11,7 @@ import (
 
 // @title Video Streaming API
 // @version 1.0
-// @description API for video frame streaming and processing via WebSocket
+// @description API for video frame streaming and processing via WebSocket and video upload
 // @termsOfService http://swagger.io/terms/
 
 // @contact.name API Support
@@ -22,7 +22,7 @@ import (
 // @license.url http://www.apache.org/licenses/LICENSE-2.0.html
 
 // @host localhost:8080
-// @BasePath /api
+// @BasePath /
 // @schemes http ws
 
 func main() {
