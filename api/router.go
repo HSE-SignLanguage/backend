@@ -25,6 +25,9 @@ func NewRouter(log *logger.MultiLogger) *chi.Mux {
 	r.Get("/swagger/*", httpSwagger.Handler(
 		httpSwagger.URL("/swagger/doc.json"),
 	))
+	r.Get("/swagger-dev/*", httpSwagger.Handler(
+		httpSwagger.URL("/swagger/doc.json"),
+	))
 
 	r.Get("/health", handlers.HealthCheck)
 	r.Get("/socket", handlers.VideoSocketHandler)

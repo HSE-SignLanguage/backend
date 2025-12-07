@@ -4,9 +4,8 @@ import (
 	"fmt"
 	"streaming/api"
 	"streaming/config"
+	"streaming/docs"
 	"streaming/logger"
-
-	_ "streaming/docs"
 )
 
 // @title Video Streaming API
@@ -32,6 +31,8 @@ func main() {
 	}
 
 	config := config.GetConfig()
+
+	docs.SwaggerInfo.Host = config.SwaggerHost
 
 	router := api.NewRouter(logger)
 	server := api.NewServer(config.Port, logger, router)
