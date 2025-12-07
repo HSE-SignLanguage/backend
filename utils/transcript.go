@@ -76,7 +76,7 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 		Messages: []chatMessage{
 			{
 				Role:    "system",
-				Content: "You turn literal sign-language transcripts into natural text. Use the previous transcript only as context. Rewrite ONLY the new literal chunk to make it natural, keep the same language, and respond with that improved chunk alone.",
+				Content: "You turn literal sign-language transcripts into natural text. Use the previous transcript only as context. Rewrite ONLY the new literal chunk to make it natural, keep the same language, and respond with that improved chunk alone. Make sure that if you receive some nonsence content you just omit it and return a blank response (e.g. space). To decide if you need to omit the content or not just use the context you're given",
 			},
 			{
 				Role:    "user",
@@ -85,7 +85,7 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 		},
 	}
 
-	log.Printf("sending request with reqBody: %+v", reqBody)
+	log.Printf("sending request with reqBody: %v", reqBody)
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
