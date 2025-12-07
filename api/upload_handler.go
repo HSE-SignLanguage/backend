@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
@@ -262,7 +262,8 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 // @Router /job/{id} [get]
 func (hc *HandlersConfig) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "id")
-	
+	hc.log.Info("getting job status AHHAHAHAHHA", "job_id", jobID)
+
 	// Debug logging - safely access route context
 	rctx := chi.RouteContext(r.Context())
 	var paramKeys, paramValues []string
@@ -270,9 +271,9 @@ func (hc *HandlersConfig) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 		paramKeys = rctx.URLParams.Keys
 		paramValues = rctx.URLParams.Values
 	}
-	
-	hc.log.Info("getting job status", 
-		"job_id", jobID, 
+
+	hc.log.Info("getting job status",
+		"job_id", jobID,
 		"request_path", r.URL.Path,
 		"request_url", r.URL.String(),
 		"param_keys_count", len(paramKeys),
@@ -297,7 +298,7 @@ func (hc *HandlersConfig) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 func (hc *HandlersConfig) ListJobs(w http.ResponseWriter, r *http.Request) {
 	jobs := hc.jobManager.GetAllJobs()
 	hc.log.Info("listing all jobs", "count", len(jobs))
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"count": len(jobs),
