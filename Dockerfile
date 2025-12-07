@@ -8,7 +8,7 @@ ARG TARGETARCH=amd64
 
 WORKDIR /src
 
-RUN apk add --no-cache ca-certificates tzdata
+# RUN apk add --no-cache ca-certificates tzdata
 
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \

@@ -22,11 +22,13 @@ func NewRouter(log *logger.MultiLogger) *chi.Mux {
 		httprate.WithKeyFuncs(httprate.KeyByIP, httprate.KeyByEndpoint),
 	))
 
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+	r.Route("/api", func(r chi.Router) {
+		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("OK"))
+		})
+		r.Get("/socket", handlers.VideoSocketHandler)
 	})
-	r.Get("/socket", handlers.VideoSocketHandler)
 
 	return r
 }
