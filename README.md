@@ -46,3 +46,21 @@ DEMO_API_URL=http://localhost:9000/api/process  # Demo API endpoint for frame pr
 ```bash
 go run main.go
 ```
+
+## API Documentation
+
+Swagger documentation is available at:
+
+**Swagger UI:** `http://localhost:8080/swagger/index.html`
+
+The API documentation includes:
+- Health check endpoint
+- WebSocket connection endpoint
+- Request/response schemas
+- Interactive API testing
+
+To regenerate Swagger docs after making changes to annotations:
+
+```bash
+swag init -g main.go --output ./docs
+```

@@ -1,13 +1,13 @@
 package api
 
 import (
-	"net/http"
 	"streaming/logger"
 	"time"
 
 	"github.com/go-chi/chi/middleware"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/httprate"
+	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 func NewRouter(log *logger.MultiLogger) *chi.Mux {
@@ -22,13 +22,12 @@ func NewRouter(log *logger.MultiLogger) *chi.Mux {
 		httprate.WithKeyFuncs(httprate.KeyByIP, httprate.KeyByEndpoint),
 	))
 
-	r.Route("/api", func(r chi.Router) {
-		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("OK"))
-		})
-		r.Get("/socket", handlers.VideoSocketHandler)
-	})
+	r.Get("/swagger/*", httpSwagger.Handler(
+		httpSwagger.URL("/swagger/doc.json"),
+	))
+
+	r.Get("/health", handlers.HealthCheck)
+	r.Get("/socket", handlers.VideoSocketHandler)
 
 	return r
 }

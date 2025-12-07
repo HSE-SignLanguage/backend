@@ -1,0 +1,64 @@
+basePath: /api
+definitions:
+  api.WebSocketMessage:
+    description: Message sent to WebSocket client with processing results
+    properties:
+      text:
+        example: Sample extracted text from frames
+        type: string
+      timestamp:
+        example: 1701955200
+        type: integer
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: support@swagger.io
+    name: API Support
+    url: http://www.swagger.io/support
+  description: API for video frame streaming and processing via WebSocket
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+  termsOfService: http://swagger.io/terms/
+  title: Video Streaming API
+  version: "1.0"
+paths:
+  /health:
+    get:
+      description: Check if the API is running and healthy
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+      summary: Health check endpoint
+      tags:
+      - health
+  /socket:
+    get:
+      consumes:
+      - application/octet-stream
+      description: Establishes a WebSocket connection for receiving video frames.
+        Frames are buffered and sent in batches of 32 to the processing API. The server
+        sends back JSON messages with extracted text from the processed frames.
+      produces:
+      - application/json
+      responses:
+        "101":
+          description: WebSocket response with extracted text
+          schema:
+            $ref: '#/definitions/api.WebSocketMessage'
+        "400":
+          description: Bad Request - Failed to accept websocket
+          schema:
+            type: string
+      summary: WebSocket endpoint for video frame streaming
+      tags:
+      - websocket
+schemes:
+- http
+- ws
+swagger: "2.0"

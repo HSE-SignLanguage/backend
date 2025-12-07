@@ -34,6 +34,27 @@ func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
 	}
 }
 
+// HealthCheck godoc
+// @Summary Health check endpoint
+// @Description Check if the API is running and healthy
+// @Tags health
+// @Produce plain
+// @Success 200 {string} string "OK"
+// @Router /health [get]
+func (hc *HandlersConfig) HealthCheck(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
+// VideoSocketHandler godoc
+// @Summary WebSocket endpoint for video frame streaming
+// @Description Establishes a WebSocket connection for receiving video frames. Frames are buffered and sent in batches of 32 to the processing API
+// @Tags websocket
+// @Accept octet-stream
+// @Produce json
+// @Success 101 {string} string "Switching Protocols"
+// @Failure 400 {string} string "Bad Request - Failed to accept websocket"
+// @Router /socket [get]
 func (hc *HandlersConfig) VideoSocketHandler(w http.ResponseWriter, r *http.Request) {
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
@@ -75,13 +96,11 @@ func (hc *HandlersConfig) handleFrameStream(ctx context.Context, c *websocket.Co
 
 		hc.log.Info("received frame", "size", len(data))
 
-		// Add frame to buffer
 		hc.mu.Lock()
 		hc.framesBuffer = append(hc.framesBuffer, data)
 		bufferLen := len(hc.framesBuffer)
 		hc.mu.Unlock()
 
-		// When we have 32 frames, send them to the demo API
 		if bufferLen >= 32 {
 			hc.mu.Lock()
 			framesToSend := make([][]byte, 32)
@@ -89,16 +108,14 @@ func (hc *HandlersConfig) handleFrameStream(ctx context.Context, c *websocket.Co
 			hc.framesBuffer = hc.framesBuffer[32:]
 			hc.mu.Unlock()
 
-			// Send frames to demo API in a goroutine to not block receiving
-			go hc.sendFramesToDemoAPI(framesToSend)
+			go hc.sendFramesToAPI(framesToSend)
 		}
 	}
 }
 
-func (hc *HandlersConfig) sendFramesToDemoAPI(frames [][]byte) {
+func (hc *HandlersConfig) sendFramesToAPI(frames [][]byte) {
 	hc.log.Info("sending batch of frames to demo API", "count", len(frames), "url", hc.demoAPIURL)
 
-	// Prepare the payload
 	payload := map[string]interface{}{
 		"frames": frames,
 		"count":  len(frames),
@@ -110,7 +127,6 @@ func (hc *HandlersConfig) sendFramesToDemoAPI(frames [][]byte) {
 		return
 	}
 
-	// Create HTTP request with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -122,7 +138,6 @@ func (hc *HandlersConfig) sendFramesToDemoAPI(frames [][]byte) {
 
 	req.Header.Set("Content-Type", "application/json")
 
-	// Send the request
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
