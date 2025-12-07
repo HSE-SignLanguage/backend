@@ -85,6 +85,8 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 		},
 	}
 
+	log.Printf("sending request with reqBody: %+v", reqBody)
+
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", fmt.Errorf("encode request: %w", err)
@@ -132,6 +134,8 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 	}
 
 	log.Printf("OpenRouter: success (improved_len=%d)", len(updated))
+
+	log.Printf("Got response from openrouter: %s", updated)
 
 	return updated, nil
 }
