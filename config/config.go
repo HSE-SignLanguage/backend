@@ -34,12 +34,16 @@ func GetEnvInt(key string) int {
 }
 
 func GetConfig() *Config {
-	err := godotenv.Load()
-	if err != nil {
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
 		log.Fatalf("could not load config: %s", err)
 	}
 
+	port := GetEnvInt("BACKEND_PORT")
+	if port == 0 {
+		log.Fatalf("BACKEND_PORT not set or invalid")
+	}
+
 	return &Config{
-		Port: GetEnvInt("BACKEND_PORT"),
+		Port: port,
 	}
 }
