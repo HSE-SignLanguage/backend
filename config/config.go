@@ -9,7 +9,8 @@ import (
 )
 
 type Config struct {
-	Port int
+	Port        int
+	SwaggerHost string
 }
 
 func GetEnv(key string) (string, error) {
@@ -43,7 +44,13 @@ func GetConfig() *Config {
 		log.Fatalf("BACKEND_PORT not set or invalid")
 	}
 
+	swaggerHost, err := GetEnv("SWAGGER_BASE_URL")
+	if err != nil {
+		log.Fatalf("SWAGGER_BASE_URL not set: %s", err)
+	}
+
 	return &Config{
-		Port: port,
+		Port:        port,
+		SwaggerHost: swaggerHost,
 	}
 }
