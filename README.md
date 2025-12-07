@@ -140,7 +140,25 @@ Set the following environment variables in `.env`:
 BACKEND_PORT=8080              # Port for the backend server
 DEMO_API_URL=http://localhost:9000/api/process  # Demo API endpoint for frame processing
 USE_MOCK=false                 # Enable mock mode (returns test data without calling demo API)
+OPENROUTER_API_KEY=your_key    # OpenRouter API key for transcript improvement
+OPENROUTER_MODEL=anthropic/claude-3.5-sonnet  # Model to use for transcript processing
 ```
+
+### Transcript Processing
+
+The system uses a two-stage approach for transcription:
+
+1. **Raw Literal Text**: Demo API returns raw literal transcription from sign language frames
+2. **Improved Transcript**: OpenRouter AI improves the literal text by:
+   - Fixing grammar and punctuation
+   - Making text more natural and readable
+   - Maintaining context across batches (up to 1000 chars)
+   - Preserving the original language
+
+**Context Management:**
+- Keeps running context of up to 1000 characters
+- Automatically trims older context when limit is reached
+- Each new batch is processed with recent context for better coherence
 
 ### Mock Mode
 

@@ -17,21 +17,21 @@ const (
 
 // VideoJob represents a video processing job
 type VideoJob struct {
-	ID              string                 `json:"id"`
-	Status          JobStatus              `json:"status"`
-	Filename        string                 `json:"filename"`
-	TotalFrames     int                    `json:"total_frames"`
-	TotalBatches    int                    `json:"total_batches"`
-	ProcessedBatches int                   `json:"processed_batches"`
-	SuccessfulBatches int                  `json:"successful_batches"`
-	FailedBatches   int                    `json:"failed_batches"`
-	Transcription   []string               `json:"transcription"` // Accumulated text results
-	FullText        string                 `json:"full_text"`     // Combined transcription
-	VideoInfo       map[string]interface{} `json:"video_info"`
-	CreatedAt       time.Time              `json:"created_at"`
-	UpdatedAt       time.Time              `json:"updated_at"`
-	CompletedAt     *time.Time             `json:"completed_at,omitempty"`
-	Error           string                 `json:"error,omitempty"`
+	ID                string                 `json:"id"`
+	Status            JobStatus              `json:"status"`
+	Filename          string                 `json:"filename"`
+	TotalFrames       int                    `json:"total_frames"`
+	TotalBatches      int                    `json:"total_batches"`
+	ProcessedBatches  int                    `json:"processed_batches"`
+	SuccessfulBatches int                    `json:"successful_batches"`
+	FailedBatches     int                    `json:"failed_batches"`
+	Transcription     []string               `json:"transcription"` // Accumulated text results
+	FullText          string                 `json:"full_text"`     // Combined transcription
+	VideoInfo         map[string]interface{} `json:"video_info"`
+	CreatedAt         time.Time              `json:"created_at"`
+	UpdatedAt         time.Time              `json:"updated_at"`
+	CompletedAt       *time.Time             `json:"completed_at,omitempty"`
+	Error             string                 `json:"error,omitempty"`
 }
 
 // JobManager manages video processing jobs
