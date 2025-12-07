@@ -1,11 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
-	"log"
+	"encoding/json"
 	"net/http"
+	"streaming/config"
 	"streaming/logger"
-	"streaming/utils"
 	"sync"
 	"time"
 
@@ -13,15 +14,23 @@ import (
 )
 
 type HandlersConfig struct {
-	log      *logger.MultiLogger
-	receiver *websocket.Conn
-	sender   *websocket.Conn
-	mu       sync.Mutex
+	log          *logger.MultiLogger
+	mu           sync.Mutex
+	framesBuffer [][]byte
+	demoAPIURL   string
 }
 
 func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
+	demoAPIURL, err := config.GetEnv("DEMO_API_URL")
+	if err != nil {
+		log.Warn("DEMO_API_URL not set, using default", "error", err)
+		demoAPIURL = "http://localhost:8080/process"
+	}
+
 	return &HandlersConfig{
-		log: log,
+		log:          log,
+		framesBuffer: make([][]byte, 0, 32),
+		demoAPIURL:   demoAPIURL,
 	}
 }
 
@@ -31,97 +40,32 @@ func (hc *HandlersConfig) VideoSocketHandler(w http.ResponseWriter, r *http.Requ
 	})
 	if err != nil {
 		hc.log.Error("failed to accept websocket", "error", err)
-		utils.WriteError(w, http.StatusBadRequest, "failed to accept websocket")
+		http.Error(w, "failed to accept websocket", http.StatusBadRequest)
 		return
 	}
 
 	c.SetReadLimit(10 * 1024 * 1024)
 
-	hc.mu.Lock()
-
-	var role string
-	switch {
-	case hc.receiver == nil:
-		hc.receiver = c
-		role = "receiver"
-		hc.log.Info("Client connected as receiver")
-	case hc.sender == nil:
-		hc.sender = c
-		role = "sender"
-		hc.log.Info("Client connected as sender")
-	default:
-		hc.mu.Unlock()
-		c.Close(websocket.StatusPolicyViolation, "max clients reached")
-		hc.log.Warn("Connection rejected: max clients reached")
-		return
-	}
-	hc.mu.Unlock()
-
-	if role == "receiver" {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		err := c.Write(ctx, websocket.MessageText, []byte(`{"type":"config","role":"receiver"}`))
-		cancel()
-		if err != nil {
-			hc.log.Error("failed to send role assignment", "error", err)
-			hc.mu.Lock()
-			hc.receiver = nil
-			hc.mu.Unlock()
-			c.Close(websocket.StatusInternalError, "failed to send config")
-			return
-		}
-		hc.handleReceiver(c)
-	} else {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		err := c.Write(ctx, websocket.MessageText, []byte(`{"type":"config","role":"sender"}`))
-		cancel()
-		if err != nil {
-			hc.log.Error("failed to send role assignment", "error", err)
-			hc.mu.Lock()
-			hc.sender = nil
-			hc.mu.Unlock()
-			c.Close(websocket.StatusInternalError, "failed to send config")
-			return
-		}
-		hc.handleSender(c)
-	}
-}
-
-func (hc *HandlersConfig) handleReceiver(c *websocket.Conn) {
+	hc.log.Info("Client connected to video socket")
 	defer func() {
-		hc.mu.Lock()
-		hc.receiver = nil
-		hc.mu.Unlock()
-		c.Close(websocket.StatusNormalClosure, "bye")
-		hc.log.Info("Receiver disconnected")
-	}()
-	for {
-		_, _, err := c.Read(context.Background())
-
-		if err != nil {
-			log.Println("receiver disconnected:", err)
-			break
-		}
-	}
-}
-
-func (hc *HandlersConfig) handleSender(c *websocket.Conn) {
-	defer func() {
-		hc.mu.Lock()
-		hc.sender = nil
-		hc.mu.Unlock()
-		c.Close(websocket.StatusNormalClosure, "bye")
-		hc.log.Info("Sender disconnected")
+		c.Close(websocket.StatusNormalClosure, "closing connection")
+		hc.log.Info("Client disconnected from video socket")
 	}()
 
+	hc.handleFrameStream(r.Context(), c)
+}
+
+func (hc *HandlersConfig) handleFrameStream(ctx context.Context, c *websocket.Conn) {
 	for {
-		typ, data, err := c.Read(context.Background())
+		typ, data, err := c.Read(ctx)
 
 		if err != nil {
-			log.Println("sender read error:", err)
+			hc.log.Error("error reading from websocket", "error", err)
 			break
 		}
 
 		if typ != websocket.MessageBinary {
+			hc.log.Warn("received non-binary message, skipping")
 			continue
 		}
 
@@ -129,25 +73,68 @@ func (hc *HandlersConfig) handleSender(c *websocket.Conn) {
 			continue
 		}
 
-		log.Printf("received video chunk from sender: %d bytes\n", len(data))
+		hc.log.Info("received frame", "size", len(data))
 
+		// Add frame to buffer
 		hc.mu.Lock()
-		receiver := hc.receiver
+		hc.framesBuffer = append(hc.framesBuffer, data)
+		bufferLen := len(hc.framesBuffer)
 		hc.mu.Unlock()
 
-		if receiver != nil {
-			writeCtx, writeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			err := receiver.Write(writeCtx, websocket.MessageBinary, data)
-			writeCancel()
+		// When we have 32 frames, send them to the demo API
+		if bufferLen >= 32 {
+			hc.mu.Lock()
+			framesToSend := make([][]byte, 32)
+			copy(framesToSend, hc.framesBuffer[:32])
+			hc.framesBuffer = hc.framesBuffer[32:]
+			hc.mu.Unlock()
 
-			if err != nil {
-				log.Println("failed to forward to receiver:", err)
-				hc.mu.Lock()
-				hc.receiver = nil
-				hc.mu.Unlock()
-			} else {
-				log.Printf("forwarded %d bytes to receiver\n", len(data))
-			}
+			// Send frames to demo API in a goroutine to not block receiving
+			go hc.sendFramesToDemoAPI(framesToSend)
 		}
 	}
+}
+
+func (hc *HandlersConfig) sendFramesToDemoAPI(frames [][]byte) {
+	hc.log.Info("sending batch of frames to demo API", "count", len(frames), "url", hc.demoAPIURL)
+
+	// Prepare the payload
+	payload := map[string]interface{}{
+		"frames": frames,
+		"count":  len(frames),
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		hc.log.Error("failed to marshal frames", "error", err)
+		return
+	}
+
+	// Create HTTP request with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", hc.demoAPIURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		hc.log.Error("failed to create request", "error", err)
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		hc.log.Error("failed to send frames to demo API", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		hc.log.Error("demo API returned error status", "status", resp.StatusCode)
+		return
+	}
+
+	hc.log.Info("successfully sent frames to demo API", "status", resp.StatusCode)
 }
