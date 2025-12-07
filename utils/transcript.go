@@ -77,7 +77,7 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 		Messages: []chatMessage{
 			{
 				Role:    "system",
-				Content: "You turn literal sign-language transcripts into natural text. Extend the running transcript with the new literal chunk, keep grammar and language natural, and reply with the full updated transcript. If the literal chunk is nonsense, keep the previous transcript unchanged.",
+				Content: "Вы преобразуете буквальную расшифровку текста на языке жестов в естественный текст. Расширьте текущую расшифровку новым фрагментом, сохраняйте естественность грамматики и языка и отвечайте полностью обновленной расшифровкой. Если текстовая часть является бессмысленной, оставьте предыдущую расшифровку без изменений. ВАЖНО: всегда пишите на русском языке.",
 			},
 			{
 				Role:    "user",
