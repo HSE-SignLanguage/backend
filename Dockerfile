@@ -8,23 +8,24 @@ ARG TARGETARCH=amd64
 
 WORKDIR /src
 
-# RUN apk add --no-cache ca-certificates tzdata
-
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
-	go mod download
+    go mod download
 
 COPY . .
 
 RUN --mount=type=cache,target=/go/pkg/mod \
-	--mount=type=cache,target=/root/.cache/go-build \
-	CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-	go build -trimpath -ldflags="-s -w" -o /bin/backend .
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /bin/backend .
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM alpine:3.20 AS runtime
+
+RUN apk add --no-cache ffmpeg ca-certificates tzdata
 
 ARG BACKEND_PORT=8080
 ENV BACKEND_PORT=${BACKEND_PORT}
+
 WORKDIR /app
 
 COPY --from=builder /bin/backend /usr/local/bin/backend
