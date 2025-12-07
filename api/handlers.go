@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"streaming/config"
 	"streaming/logger"
+	"streaming/utils"
 	"sync"
 	"time"
 
@@ -31,7 +36,6 @@ func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
 	}
 }
 
-// WebSocketMessage represents the payload sent back to clients over the socket.
 type WebSocketMessage struct {
 	Text string `json:"text"`
 }
@@ -179,4 +183,166 @@ func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Con
 	}
 
 	return c.Write(ctx, websocket.MessageText, data)
+}
+
+// VideoUploadHandler godoc
+// @Summary Upload video for frame-by-frame processing
+// @Description Upload a video file, extract frames, and process them in batches of 32 frames
+// @Tags video
+// @Accept multipart/form-data
+// @Produce json
+// @Param video formData file true "Video file to process"
+// @Param interval formData int false "Frame extraction interval (default: 1, extract every frame)"
+// @Success 200 {object} map[string]interface{} "Processing result with status and metadata"
+// @Failure 400 {object} map[string]string "Bad Request - Invalid file or format"
+// @Failure 500 {object} map[string]string "Internal Server Error"
+// @Router /upload [post]
+func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(100 << 20); err != nil {
+		hc.log.Error("failed to parse multipart form", "error", err)
+		http.Error(w, "failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("video")
+	if err != nil {
+		hc.log.Error("failed to get video file", "error", err)
+		http.Error(w, "video file is required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	hc.log.Info("received video upload", "filename", header.Filename, "size", header.Size)
+
+	tempDir := filepath.Join("tmp", "uploads")
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		hc.log.Error("failed to create temp directory", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	tempFilePath := filepath.Join(tempDir, fmt.Sprintf("%d_%s", time.Now().Unix(), header.Filename))
+	tempFile, err := os.Create(tempFilePath)
+	if err != nil {
+		hc.log.Error("failed to create temp file", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		tempFile.Close()
+		os.Remove(tempFilePath)
+	}()
+
+	if _, err := io.Copy(tempFile, file); err != nil {
+		hc.log.Error("failed to save temp file", "error", err)
+		http.Error(w, "failed to save video", http.StatusInternalServerError)
+		return
+	}
+	tempFile.Close()
+
+	hc.log.Info("extracting frames from video", "path", tempFilePath)
+	extractor, err := utils.NewVideoFrameExtractor(tempFilePath)
+	if err != nil {
+		hc.log.Error("failed to create video extractor", "error", err)
+		http.Error(w, "failed to process video", http.StatusInternalServerError)
+		return
+	}
+	defer extractor.Close()
+
+	// Get video info
+	videoInfo := extractor.GetVideoInfo()
+	hc.log.Info("video info", "info", videoInfo)
+
+	// Extract frames (optionally with interval)
+	var frames [][]byte
+	interval := 1 // Default: extract every frame
+	if intervalStr := r.FormValue("interval"); intervalStr != "" {
+		fmt.Sscanf(intervalStr, "%d", &interval)
+	}
+
+	if interval > 1 {
+		frames, err = extractor.ExtractFramesWithInterval(interval)
+	} else {
+		frames, err = extractor.ExtractAllFrames()
+	}
+
+	if err != nil {
+		hc.log.Error("failed to extract frames", "error", err)
+		http.Error(w, "failed to extract frames", http.StatusInternalServerError)
+		return
+	}
+
+	hc.log.Info("extracted frames", "count", len(frames))
+
+	// Split frames into batches of 32
+	batches := utils.BatchFrames(frames, 32)
+	hc.log.Info("created batches", "batch_count", len(batches))
+
+	// Process batches sequentially
+	successCount := 0
+	for i, batch := range batches {
+		hc.log.Info("processing batch", "batch_num", i+1, "batch_size", len(batch))
+
+		if err := hc.sendFrameBatchToDemoAPI(batch); err != nil {
+			hc.log.Error("failed to send batch to demo API", "batch_num", i+1, "error", err)
+			// Continue processing remaining batches
+		} else {
+			successCount++
+		}
+
+		// Small delay between batches to avoid overwhelming the API
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Send response
+	response := map[string]interface{}{
+		"status":             "completed",
+		"total_frames":       len(frames),
+		"total_batches":      len(batches),
+		"successful_batches": successCount,
+		"video_info":         videoInfo,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+
+	hc.log.Info("video processing completed", "total_frames", len(frames), "successful_batches", successCount)
+}
+
+// sendFrameBatchToDemoAPI sends a batch of frames to the demo API
+func (hc *HandlersConfig) sendFrameBatchToDemoAPI(frames [][]byte) error {
+	payload := map[string]interface{}{
+		"frames": frames,
+		"count":  len(frames),
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal frames: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", hc.demoAPIURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("demo API returned error status: %d", resp.StatusCode)
+	}
+
+	hc.log.Info("successfully sent batch to demo API", "status", resp.StatusCode)
+	return nil
 }

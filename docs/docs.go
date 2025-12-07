@@ -46,7 +46,7 @@ const docTemplate = `{
         },
         "/socket": {
             "get": {
-                "description": "Establishes a WebSocket connection for receiving video frames. Frames are buffered and sent in batches of 32 to the processing API. The server sends back JSON messages with extracted text from the processed frames.",
+                "description": "Establishes a WebSocket connection for receiving video frames. Frames are buffered and sent in batches of 32 to the processing API and the resulting text is streamed back to the client as JSON messages",
                 "consumes": [
                     "application/octet-stream"
                 ],
@@ -72,16 +72,71 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/upload": {
+            "post": {
+                "description": "Upload a video file, extract frames, and process them in batches of 32 frames",
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "video"
+                ],
+                "summary": "Upload video for frame-by-frame processing",
+                "parameters": [
+                    {
+                        "type": "file",
+                        "description": "Video file to process",
+                        "name": "video",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Frame extraction interval (default: 1, extract every frame)",
+                        "name": "interval",
+                        "in": "formData"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Processing result with status and metadata",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request - Invalid file or format",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
         "api.WebSocketMessage": {
-            "description": "Message sent to WebSocket client with processing results",
             "type": "object",
             "properties": {
                 "text": {
-                    "type": "string",
-                    "example": "Sample extracted text from frames"
+                    "type": "string"
                 }
             }
         }
@@ -92,10 +147,10 @@ const docTemplate = `{
 var SwaggerInfo = &swag.Spec{
 	Version:          "1.0",
 	Host:             "localhost:8080",
-	BasePath:         "/api",
+	BasePath:         "/",
 	Schemes:          []string{"http", "ws"},
 	Title:            "Video Streaming API",
-	Description:      "API for video frame streaming and processing via WebSocket",
+	Description:      "API for video frame streaming and processing via WebSocket and video upload",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

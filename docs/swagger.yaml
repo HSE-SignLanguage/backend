@@ -1,10 +1,8 @@
-basePath: /api
+basePath: /
 definitions:
   api.WebSocketMessage:
-    description: Message sent to WebSocket client with processing results
     properties:
       text:
-        example: Sample extracted text from frames
         type: string
     type: object
 host: localhost:8080
@@ -13,7 +11,8 @@ info:
     email: support@swagger.io
     name: API Support
     url: http://www.swagger.io/support
-  description: API for video frame streaming and processing via WebSocket
+  description: API for video frame streaming and processing via WebSocket and video
+    upload
   license:
     name: Apache 2.0
     url: http://www.apache.org/licenses/LICENSE-2.0.html
@@ -39,8 +38,8 @@ paths:
       consumes:
       - application/octet-stream
       description: Establishes a WebSocket connection for receiving video frames.
-        Frames are buffered and sent in batches of 32 to the processing API. The server
-        sends back JSON messages with extracted text from the processed frames.
+        Frames are buffered and sent in batches of 32 to the processing API and the
+        resulting text is streamed back to the client as JSON messages
       produces:
       - application/json
       responses:
@@ -55,6 +54,45 @@ paths:
       summary: WebSocket endpoint for video frame streaming
       tags:
       - websocket
+  /upload:
+    post:
+      consumes:
+      - multipart/form-data
+      description: Upload a video file, extract frames, and process them in batches
+        of 32 frames
+      parameters:
+      - description: Video file to process
+        in: formData
+        name: video
+        required: true
+        type: file
+      - description: 'Frame extraction interval (default: 1, extract every frame)'
+        in: formData
+        name: interval
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Processing result with status and metadata
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request - Invalid file or format
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Upload video for frame-by-frame processing
+      tags:
+      - video
 schemes:
 - http
 - ws
