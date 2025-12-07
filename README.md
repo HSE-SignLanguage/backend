@@ -139,6 +139,24 @@ Set the following environment variables in `.env`:
 ```env
 BACKEND_PORT=8080              # Port for the backend server
 DEMO_API_URL=http://localhost:9000/api/process  # Demo API endpoint for frame processing
+USE_MOCK=false                 # Enable mock mode (returns test data without calling demo API)
+```
+
+### Mock Mode
+
+Set `USE_MOCK=true` to enable mock/test mode. When enabled:
+- WebSocket endpoint returns mock transcription data without calling the demo API
+- Video upload endpoint returns test data for each batch
+- Useful for frontend development and testing without a real processing backend
+- Can be enabled by setting env var to `true` or `1`
+
+**Example with mock mode:**
+```bash
+# In .env
+USE_MOCK=true
+
+# Or run with environment variable
+USE_MOCK=true go run main.go
 ```
 
 ## Prerequisites

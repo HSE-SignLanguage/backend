@@ -18,12 +18,14 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 type HandlersConfig struct {
 	log        *logger.MultiLogger
 	demoAPIURL string
 	jobManager *JobManager
+	useMock    bool
 }
 
 func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
@@ -33,10 +35,21 @@ func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
 		demoAPIURL = "http://localhost:8080/process"
 	}
 
+	// Parse USE_MOCK env var
+	useMock := false
+	if mockEnv, err := config.GetEnv("USE_MOCK"); err == nil {
+		useMock = mockEnv == "true" || mockEnv == "1"
+	}
+
+	if useMock {
+		log.Info("Mock mode enabled - will return test data")
+	}
+
 	return &HandlersConfig{
 		log:        log,
 		demoAPIURL: demoAPIURL,
 		jobManager: NewJobManager(),
+		useMock:    useMock,
 	}
 }
 
@@ -150,6 +163,18 @@ func (hc *HandlersConfig) handleFrameStream(ctx context.Context, c *websocket.Co
 
 func (hc *HandlersConfig) sendFramesToAPI(ctx context.Context, frames [][]byte, c *websocket.Conn, writeMu *sync.Mutex) {
 	hc.log.Info("sending batch of frames to demo API", "count", len(frames), "url", hc.demoAPIURL)
+
+	// Return mock data if mock mode is enabled
+	if hc.useMock {
+		mockResponse := WebSocketMessage{
+			Text: fmt.Sprintf("Mock response for %d frames. This is test streaming data.", len(frames)),
+		}
+		hc.log.Info("returning mock data to websocket client")
+		if err := hc.sendTextToClient(ctx, c, writeMu, mockResponse); err != nil {
+			hc.log.Error("failed to send mock text to websocket client", "error", err)
+		}
+		return
+	}
 
 	payload := map[string]interface{}{
 		"frames": frames,
@@ -273,8 +298,8 @@ func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Con
 // @Router /upload [post]
 func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(100 << 20); err != nil {
-		hc.log.Error("failed to parse multipart form", "error", err)
-		http.Error(w, "failed to parse form", http.StatusBadRequest)
+		hc.log.Error("failed to parse multipart form", "error", err, "content_type", r.Header.Get("Content-Type"))
+		http.Error(w, fmt.Sprintf("failed to parse multipart form: %v. Ensure Content-Type is multipart/form-data with boundary", err), http.StatusBadRequest)
 		return
 	}
 
@@ -296,7 +321,7 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Generate job ID
-	jobID := fmt.Sprintf("%d-%s", time.Now().UnixNano(), header.Filename)
+	jobID := uuid.New().String()
 
 	// Save file with job ID
 	tempFilePath := filepath.Join(tempDir, fmt.Sprintf("%s_%s", jobID, header.Filename))
@@ -464,6 +489,13 @@ func (hc *HandlersConfig) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 
 // sendFrameBatchToDemoAPIWithResponse sends frames and returns the text response
 func (hc *HandlersConfig) sendFrameBatchToDemoAPIWithResponse(frames [][]byte) (string, error) {
+	// Return mock data if mock mode is enabled
+	if hc.useMock {
+		mockText := fmt.Sprintf("Mock transcription for batch of %d frames. This is test data.", len(frames))
+		hc.log.Info("returning mock data", "text_length", len(mockText))
+		return mockText, nil
+	}
+
 	payload := map[string]interface{}{
 		"frames": frames,
 		"count":  len(frames),
