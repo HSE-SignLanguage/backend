@@ -117,7 +117,8 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 	tempFile.Close()
 
 	// Create job
-	_ = hc.jobManager.CreateJob(jobID, header.Filename)
+	job := hc.jobManager.CreateJob(jobID, header.Filename)
+	hc.log.Info("created job", "job_id", jobID, "filename", header.Filename, "status", job.Status)
 
 	// Get interval parameter
 	interval := 1
@@ -234,7 +235,8 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 	// Use the final improved context as full text
 	hc.jobManager.CompleteJob(jobID, transcriptContext)
 
-	hc.log.Info("video processing completed", "job_id", jobID, "total_frames", len(frames), "successful_batches", hc.jobManager.jobs[jobID].SuccessfulBatches)
+	job, _ := hc.jobManager.GetJob(jobID)
+	hc.log.Info("video processing completed", "job_id", jobID, "total_frames", len(frames), "successful_batches", job.SuccessfulBatches)
 }
 
 // GetJobStatus godoc
@@ -260,16 +262,33 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 // @Router /job/{id} [get]
 func (hc *HandlersConfig) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "id")
+	hc.log.Info("getting job status", "job_id", jobID, "request_path", r.URL.Path)
 
 	job, exists := hc.jobManager.GetJob(jobID)
 	if !exists {
 		hc.log.Error("job not found", "job_id", jobID)
-		http.Error(w, "job not found", http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "job not found"})
 		return
 	}
 
+	hc.log.Info("job found", "job_id", jobID, "status", job.Status)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(job)
+}
+
+// ListJobs returns all jobs (for debugging)
+func (hc *HandlersConfig) ListJobs(w http.ResponseWriter, r *http.Request) {
+	jobs := hc.jobManager.GetAllJobs()
+	hc.log.Info("listing all jobs", "count", len(jobs))
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"count": len(jobs),
+		"jobs":  jobs,
+	})
 }
 
 func (hc *HandlersConfig) sendFrameBatchToDemoAPIWithResponse(frames [][]byte) (string, error) {

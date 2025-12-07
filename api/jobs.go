@@ -130,3 +130,15 @@ func (jm *JobManager) CleanupOldJobs(maxAge time.Duration) {
 		}
 	}
 }
+
+// GetAllJobs returns all jobs (for debugging)
+func (jm *JobManager) GetAllJobs() map[string]*VideoJob {
+	jm.mu.RLock()
+	defer jm.mu.RUnlock()
+
+	jobs := make(map[string]*VideoJob, len(jm.jobs))
+	for id, job := range jm.jobs {
+		jobs[id] = job
+	}
+	return jobs
+}
