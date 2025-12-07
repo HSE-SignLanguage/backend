@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -200,7 +199,8 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 	for i, batch := range batches {
 		hc.log.Info("processing batch", "job_id", jobID, "batch_num", i+1, "batch_size", len(batch))
 
-		literalText, err := hc.sendFrameBatchToDemoAPIWithResponse(batch)
+		mockText := fmt.Sprintf("Mock transcription for batch of %d frames. This is test data.", len(batch))
+		literalText, err := hc.requestLiteralText(context.Background(), batch, mockText)
 		if err != nil {
 			hc.log.Error("failed to send batch to demo API", "job_id", jobID, "batch_num", i+1, "error", err)
 			hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
@@ -304,89 +304,4 @@ func (hc *HandlersConfig) ListJobs(w http.ResponseWriter, r *http.Request) {
 		"count": len(jobs),
 		"jobs":  jobs,
 	})
-}
-
-func (hc *HandlersConfig) sendFrameBatchToDemoAPIWithResponse(frames [][]byte) (string, error) {
-	if hc.useMock {
-		mockText := fmt.Sprintf("Mock transcription for batch of %d frames. This is test data.", len(frames))
-		hc.log.Info("returning mock data", "text_length", len(mockText))
-		return mockText, nil
-	}
-
-	payload := map[string]interface{}{
-		"frames": frames,
-		"count":  len(frames),
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal frames: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", hc.demoAPIURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return "", fmt.Errorf("demo API returned error status: %d", resp.StatusCode)
-	}
-
-	var apiResp WebSocketMessage
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		hc.log.Warn("failed to decode demo API response", "error", err)
-		return "", nil
-	}
-
-	hc.log.Info("successfully sent batch to demo API", "status", resp.StatusCode, "text_length", len(apiResp.Text))
-	return apiResp.Text, nil
-}
-
-// sendFrameBatchToDemoAPI sends a batch of frames to the demo API
-func (hc *HandlersConfig) sendFrameBatchToDemoAPI(frames [][]byte) error {
-	payload := map[string]interface{}{
-		"frames": frames,
-		"count":  len(frames),
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal frames: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", hc.demoAPIURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return fmt.Errorf("demo API returned error status: %d", resp.StatusCode)
-	}
-
-	hc.log.Info("successfully sent batch to demo API", "status", resp.StatusCode)
-	return nil
 }
