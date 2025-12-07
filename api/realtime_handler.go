@@ -203,19 +203,19 @@ func (hc *HandlersConfig) sendFramesToAPI(ctx context.Context, frames [][]byte, 
 	previousTranscript := *transcriptContext
 	trimmedContext := hc.trimContext(previousTranscript, maxContextChars)
 
-	updatedTranscript, err := hc.updateTranscriptWithContext(trimmedContext, literalText)
+	updatedTranscript, newSegment, err := hc.updateTranscriptWithContext(trimmedContext, literalText)
 	if err != nil {
 		hc.log.Error("failed to update transcript", "error", err)
-		updatedTranscript = strings.TrimSpace(trimmedContext + " " + literalText)
+		newSegment = strings.TrimSpace(literalText)
+		updatedTranscript = combineTranscript(trimmedContext, newSegment)
 	}
 
-	*transcriptContext = updatedTranscript
-
-	newSegment := extractNewSegment(previousTranscript, updatedTranscript)
 	if strings.TrimSpace(newSegment) == "" {
 		hc.log.Debug("no new transcript segment to send")
 		return
 	}
+
+	*transcriptContext = updatedTranscript
 
 	response := WebSocketMessage{Text: newSegment}
 	if err := hc.sendTextToClient(ctx, c, writeMu, response); err != nil {
@@ -232,19 +232,35 @@ func (hc *HandlersConfig) trimContext(context string, maxChars int) string {
 	return context[len(context)-maxChars:]
 }
 
-func (hc *HandlersConfig) updateTranscriptWithContext(context, newLiteral string) (string, error) {
+func (hc *HandlersConfig) updateTranscriptWithContext(context, newLiteral string) (string, string, error) {
+	chunk := strings.TrimSpace(newLiteral)
+
+	if chunk == "" {
+		return strings.TrimSpace(context), "", nil
+	}
+
 	if hc.useMock {
 		if context == "" {
-			return "Mock transcript: " + newLiteral, nil
+			chunk = "Mock transcript: " + chunk
 		}
-		return combineTranscript(context, newLiteral), nil
+		return combineTranscript(context, chunk), chunk, nil
 	}
 
 	if !hc.useOpenRouter {
-		return combineTranscript(context, newLiteral), nil
+		return combineTranscript(context, chunk), chunk, nil
 	}
 
-	return utils.UpdateTranscript(context, newLiteral)
+	improvedChunk, err := utils.UpdateTranscript(context, newLiteral)
+	if err != nil {
+		return "", "", err
+	}
+
+	improvedChunk = strings.TrimSpace(improvedChunk)
+	if improvedChunk == "" {
+		return strings.TrimSpace(context), "", nil
+	}
+
+	return combineTranscript(context, improvedChunk), improvedChunk, nil
 }
 
 func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Conn, writeMu *sync.Mutex, message WebSocketMessage) error {
@@ -284,52 +300,4 @@ func (hc *HandlersConfig) requestLiteralText(ctx context.Context, frames [][]byt
 
 	hc.log.Info("received literal text from ML API", "text_length", len(text))
 	return text, nil
-}
-
-func combineTranscript(context, literal string) string {
-	context = strings.TrimSpace(context)
-	literal = strings.TrimSpace(literal)
-
-	switch {
-	case context == "":
-		return literal
-	case literal == "":
-		return context
-	default:
-		return context + " " + literal
-	}
-}
-
-func shouldSkipLiteral(text string) bool {
-	return strings.EqualFold(strings.TrimSpace(text), "no")
-}
-
-func extractNewSegment(previous, updated string) string {
-	if updated == "" {
-		return ""
-	}
-	if previous == "" {
-		return updated
-	}
-
-	maxOverlap := min(len(previous), len(updated))
-	overlap := 0
-	for i := maxOverlap; i > 0; i-- {
-		if previous[len(previous)-i:] == updated[:i] {
-			overlap = i
-			break
-		}
-	}
-
-	if len(updated) > overlap {
-		return updated[overlap:]
-	}
-	return ""
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

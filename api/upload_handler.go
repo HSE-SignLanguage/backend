@@ -220,11 +220,20 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 
 			// Trim context and update with OpenRouter
 			trimmedContext := hc.trimContext(transcriptContext, 1000)
-			updatedTranscript, err := hc.updateTranscriptWithContext(trimmedContext, literalText)
+			updatedTranscript, newSegment, err := hc.updateTranscriptWithContext(trimmedContext, literalText)
 			if err != nil {
 				hc.log.Warn("failed to update transcript, using literal", "job_id", jobID, "error", err)
-				// Fallback to literal text
-				updatedTranscript = strings.TrimSpace(trimmedContext + " " + literalText)
+				newSegment = strings.TrimSpace(literalText)
+				updatedTranscript = combineTranscript(trimmedContext, newSegment)
+			}
+
+			if strings.TrimSpace(newSegment) == "" {
+				hc.log.Info("no new transcript segment generated", "job_id", jobID, "batch_num", i+1)
+				hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
+					job.SuccessfulBatches++
+					job.ProcessedBatches++
+				})
+				continue
 			}
 
 			// Update running context
@@ -234,9 +243,7 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 				job.SuccessfulBatches++
 				job.ProcessedBatches++
 			})
-			if literalText != "" {
-				hc.jobManager.AddTranscriptionResult(jobID, literalText)
-			}
+			hc.jobManager.AddTranscriptionResult(jobID, newSegment)
 		}
 
 		time.Sleep(100 * time.Millisecond)

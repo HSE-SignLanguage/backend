@@ -12,14 +12,14 @@ import (
 	"streaming/utils"
 )
 
-func TestUpdateTranscriptReturnsCurrentWhenNewLiteralEmpty(t *testing.T) {
+func TestUpdateTranscriptReturnsEmptyWhenNewLiteralEmpty(t *testing.T) {
 	got, err := utils.UpdateTranscript("  Hello world  ", "   ")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	if got != "Hello world" {
-		t.Fatalf("expected trimmed current context, got %q", got)
+	if got != "" {
+		t.Fatalf("expected empty string when literal is empty, got %q", got)
 	}
 }
 
