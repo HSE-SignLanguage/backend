@@ -263,6 +263,7 @@ func (hc *HandlersConfig) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 
 	job, exists := hc.jobManager.GetJob(jobID)
 	if !exists {
+		hc.log.Error("job not found", "job_id", jobID)
 		http.Error(w, "job not found", http.StatusNotFound)
 		return
 	}
