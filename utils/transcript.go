@@ -49,10 +49,11 @@ type chatResponse struct {
 }
 
 func UpdateTranscript(currentContext, newLiteral string) (string, error) {
+	current := strings.TrimSpace(currentContext)
 	newLiteral = strings.TrimSpace(newLiteral)
 	if newLiteral == "" {
-		log.Println("OpenRouter: literal chunk empty, skipping")
-		return "", nil
+		log.Println("OpenRouter: literal chunk empty, returning current context")
+		return current, nil
 	}
 
 	apiKey, err := config.GetEnv(openRouterAPIKeyEnvVar)
@@ -67,7 +68,7 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 		return "", err
 	}
 
-	log.Printf("OpenRouter: preparing request (model=%s, context_len=%d, literal_len=%d)", model, len(strings.TrimSpace(currentContext)), len(newLiteral))
+	log.Printf("OpenRouter: preparing request (model=%s, context_len=%d, literal_len=%d)", model, len(current), len(newLiteral))
 
 	prompt := buildPrompt(currentContext, newLiteral)
 
@@ -76,7 +77,7 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 		Messages: []chatMessage{
 			{
 				Role:    "system",
-				Content: "You turn literal sign-language transcripts into natural text. Use the previous transcript only as context. Rewrite ONLY the new literal chunk to make it natural, keep the same language, and respond with that improved chunk alone.",
+				Content: "You turn literal sign-language transcripts into natural text. Extend the running transcript with the new literal chunk, keep grammar and language natural, and reply with the full updated transcript. If the literal chunk is nonsense, keep the previous transcript unchanged.",
 			},
 			{
 				Role:    "user",
@@ -84,6 +85,8 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 			},
 		},
 	}
+
+	log.Printf("OpenRouter: sending request payload: %v", reqBody)
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -127,21 +130,23 @@ func UpdateTranscript(currentContext, newLiteral string) (string, error) {
 
 	updated := strings.TrimSpace(parsed.Choices[0].Message.Content)
 	if updated == "" {
-		log.Println("OpenRouter: response contained empty chunk")
+		log.Println("OpenRouter: response contained empty transcript")
 		return "", errors.New("empty transcript received from openrouter")
 	}
 
-	log.Printf("OpenRouter: success (improved_len=%d)", len(updated))
+	log.Printf("OpenRouter: success (updated_len=%d)", len(updated))
+
+	log.Printf("OpenRouter: response preview: %.80s", updated)
 
 	return updated, nil
 }
 
 func buildPrompt(currentContext, newLiteral string) string {
 	var sb strings.Builder
-	sb.WriteString("Previous transcript for context (do not repeat it):\n")
+	sb.WriteString("Current transcript (may be empty):\n")
 	sb.WriteString(strings.TrimSpace(currentContext))
-	sb.WriteString("\n\nNew literal chunk that needs polishing:\n")
+	sb.WriteString("\n\nNew literal chunk:\n")
 	sb.WriteString(newLiteral)
-	sb.WriteString("\n\nProvide only the natural-sounding rewrite of the new chunk.")
+	sb.WriteString("\n\nReturn the full updated transcript, sounding natural and coherent.")
 	return sb.String()
 }

@@ -233,10 +233,11 @@ func (hc *HandlersConfig) trimContext(context string, maxChars int) string {
 }
 
 func (hc *HandlersConfig) updateTranscriptWithContext(context, newLiteral string) (string, string, error) {
+	context = strings.TrimSpace(context)
 	chunk := strings.TrimSpace(newLiteral)
 
 	if chunk == "" {
-		return strings.TrimSpace(context), "", nil
+		return context, "", nil
 	}
 
 	if hc.useMock {
@@ -250,17 +251,18 @@ func (hc *HandlersConfig) updateTranscriptWithContext(context, newLiteral string
 		return combineTranscript(context, chunk), chunk, nil
 	}
 
-	improvedChunk, err := utils.UpdateTranscript(context, newLiteral)
+	fullTranscript, err := utils.UpdateTranscript(context, newLiteral)
 	if err != nil {
 		return "", "", err
 	}
 
-	improvedChunk = strings.TrimSpace(improvedChunk)
-	if improvedChunk == "" {
-		return strings.TrimSpace(context), "", nil
+	fullTranscript = strings.TrimSpace(fullTranscript)
+	if fullTranscript == "" {
+		return context, "", nil
 	}
 
-	return combineTranscript(context, improvedChunk), improvedChunk, nil
+	newSegment := extractNewSegment(context, fullTranscript)
+	return fullTranscript, newSegment, nil
 }
 
 func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Conn, writeMu *sync.Mutex, message WebSocketMessage) error {
