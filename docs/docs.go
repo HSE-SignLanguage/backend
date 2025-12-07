@@ -46,7 +46,7 @@ const docTemplate = `{
         },
         "/socket": {
             "get": {
-                "description": "Establishes a WebSocket connection for receiving video frames. Frames are buffered and sent in batches of 32 to the processing API and the resulting text is streamed back to the client as JSON messages",
+                "description": "Establishes a WebSocket connection for receiving video frames. Send binary frames to the server, and receive text responses back.\n\n**Client Flow:**\n1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)\n2. Send video frames as binary messages (MessageBinary)\n3. Server buffers frames and sends batches of 32 to processing API\n4. Receive text responses as JSON messages (MessageText)\n\n**Response Format:**\nThe server sends back JSON text messages with the structure:\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"text\": \"extracted or processed text from the frames\"\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\nconst ws = new WebSocket('ws://localhost:8080/socket');\n\n// Send binary frame data\nws.send(frameDataBlob);\n\n// Receive text messages\nws.onmessage = (event) =\u003e {\nconst data = JSON.parse(event.data);\nconsole.log('Received text:', data.text);\n};\n` + "`" + `` + "`" + `` + "`" + `",
                 "consumes": [
                     "application/octet-stream"
                 ],
@@ -75,7 +75,7 @@ const docTemplate = `{
         },
         "/upload": {
             "post": {
-                "description": "Upload a video file, extract frames, and process them in batches of 32 frames",
+                "description": "Upload a video file, extract frames, and process them in batches of 32 frames. Unlike the WebSocket endpoint, this processes the entire video at once and returns a summary.\n\n**Process Flow:**\n1. Upload video file via multipart form data\n2. Server extracts frames from the video\n3. Frames are split into batches of 32\n4. Each batch is sent sequentially to the processing API\n5. Returns processing summary with statistics\n\n**Response Format:**\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"status\": \"completed\",\n\"total_frames\": 250,\n\"total_batches\": 8,\n\"successful_batches\": 8,\n\"video_info\": {\n\"fps\": 25.0,\n\"duration\": 10.0,\n\"frame_width\": 1920,\n\"frame_height\": 1080,\n\"estimated_frames\": 250\n}\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\nconst formData = new FormData();\nformData.append('video', videoFile);\nformData.append('interval', '1'); // Optional: extract every Nth frame\n\nconst response = await fetch('http://localhost:8080/upload', {\nmethod: 'POST',\nbody: formData\n});\n\nconst result = await response.json();\nconsole.log('Processing completed:', result);\n` + "`" + `` + "`" + `` + "`" + `",
                 "consumes": [
                     "multipart/form-data"
                 ],

@@ -54,7 +54,35 @@ func (hc *HandlersConfig) HealthCheck(w http.ResponseWriter, r *http.Request) {
 
 // VideoSocketHandler godoc
 // @Summary WebSocket endpoint for video frame streaming
-// @Description Establishes a WebSocket connection for receiving video frames. Frames are buffered and sent in batches of 32 to the processing API and the resulting text is streamed back to the client as JSON messages
+// @Description Establishes a WebSocket connection for receiving video frames. Send binary frames to the server, and receive text responses back.
+// @Description
+// @Description **Client Flow:**
+// @Description 1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)
+// @Description 2. Send video frames as binary messages (MessageBinary)
+// @Description 3. Server buffers frames and sends batches of 32 to processing API
+// @Description 4. Receive text responses as JSON messages (MessageText)
+// @Description
+// @Description **Response Format:**
+// @Description The server sends back JSON text messages with the structure:
+// @Description ```json
+// @Description {
+// @Description   "text": "extracted or processed text from the frames"
+// @Description }
+// @Description ```
+// @Description
+// @Description **Frontend Example:**
+// @Description ```javascript
+// @Description const ws = new WebSocket('ws://localhost:8080/socket');
+// @Description
+// @Description // Send binary frame data
+// @Description ws.send(frameDataBlob);
+// @Description
+// @Description // Receive text messages
+// @Description ws.onmessage = (event) => {
+// @Description   const data = JSON.parse(event.data);
+// @Description   console.log('Received text:', data.text);
+// @Description };
+// @Description ```
 // @Tags websocket
 // @Accept octet-stream
 // @Produce json
@@ -187,7 +215,46 @@ func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Con
 
 // VideoUploadHandler godoc
 // @Summary Upload video for frame-by-frame processing
-// @Description Upload a video file, extract frames, and process them in batches of 32 frames
+// @Description Upload a video file, extract frames, and process them in batches of 32 frames. Unlike the WebSocket endpoint, this processes the entire video at once and returns a summary.
+// @Description
+// @Description **Process Flow:**
+// @Description 1. Upload video file via multipart form data
+// @Description 2. Server extracts frames from the video
+// @Description 3. Frames are split into batches of 32
+// @Description 4. Each batch is sent sequentially to the processing API
+// @Description 5. Returns processing summary with statistics
+// @Description
+// @Description **Response Format:**
+// @Description ```json
+// @Description {
+// @Description   "status": "completed",
+// @Description   "total_frames": 250,
+// @Description   "total_batches": 8,
+// @Description   "successful_batches": 8,
+// @Description   "video_info": {
+// @Description     "fps": 25.0,
+// @Description     "duration": 10.0,
+// @Description     "frame_width": 1920,
+// @Description     "frame_height": 1080,
+// @Description     "estimated_frames": 250
+// @Description   }
+// @Description }
+// @Description ```
+// @Description
+// @Description **Frontend Example:**
+// @Description ```javascript
+// @Description const formData = new FormData();
+// @Description formData.append('video', videoFile);
+// @Description formData.append('interval', '1'); // Optional: extract every Nth frame
+// @Description
+// @Description const response = await fetch('http://localhost:8080/upload', {
+// @Description   method: 'POST',
+// @Description   body: formData
+// @Description });
+// @Description
+// @Description const result = await response.json();
+// @Description console.log('Processing completed:', result);
+// @Description ```
 // @Tags video
 // @Accept multipart/form-data
 // @Produce json
