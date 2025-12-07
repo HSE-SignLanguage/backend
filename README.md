@@ -27,7 +27,7 @@ Connect to this endpoint to stream video frames in real-time. The server expects
 **Behavior:**
 - Accepts WebSocket connections with binary frame data
 - Buffers frames until 32 frames are collected
-- Sends batches of 32 frames to the demo API endpoint (configured via `DEMO_API_URL`)
+- Sends batches of 32 frames to the demo API endpoint (configured via `ML_API_URL`)
 - Continues to accept and batch frames concurrently
 
 **Frame Format:**
@@ -138,10 +138,11 @@ Set the following environment variables in `.env`:
 
 ```env
 BACKEND_PORT=8080              # Port for the backend server
-DEMO_API_URL=http://localhost:9000/api/process  # Demo API endpoint for frame processing
+ML_API_URL=http://localhost:9000/api/process  # Demo API endpoint for frame processing
 USE_MOCK=false                 # Enable mock mode (returns test data without calling demo API)
 OPENROUTER_API_KEY=your_key    # OpenRouter API key for transcript improvement
 OPENROUTER_MODEL=anthropic/claude-3.5-sonnet  # Model to use for transcript processing
+USE_OPENROUTER=true            # Set to false to skip OpenRouter transcript polishing
 ```
 
 ### Transcript Processing
@@ -154,6 +155,8 @@ The system uses a two-stage approach for transcription:
    - Making text more natural and readable
    - Maintaining context across batches (up to 1000 chars)
    - Preserving the original language
+
+Set `USE_OPENROUTER=false` if you only need the literal output (the backend will concatenate batches without calling OpenRouter).
 
 **Context Management:**
 - Keeps running context of up to 1000 characters

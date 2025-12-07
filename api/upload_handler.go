@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
@@ -117,7 +116,8 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 	tempFile.Close()
 
 	// Create job
-	_ = hc.jobManager.CreateJob(jobID, header.Filename)
+	job := hc.jobManager.CreateJob(jobID, header.Filename)
+	hc.log.Info("created job", "job_id", jobID, "filename", header.Filename, "status", job.Status)
 
 	// Get interval parameter
 	interval := 1
@@ -199,7 +199,8 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 	for i, batch := range batches {
 		hc.log.Info("processing batch", "job_id", jobID, "batch_num", i+1, "batch_size", len(batch))
 
-		literalText, err := hc.sendFrameBatchToDemoAPIWithResponse(batch)
+		mockText := fmt.Sprintf("Mock transcription for batch of %d frames. This is test data.", len(batch))
+		literalText, err := hc.requestLiteralText(context.Background(), batch, mockText)
 		if err != nil {
 			hc.log.Error("failed to send batch to demo API", "job_id", jobID, "batch_num", i+1, "error", err)
 			hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
@@ -207,13 +208,32 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 				job.ProcessedBatches++
 			})
 		} else {
+			literalText = strings.TrimSpace(literalText)
+			if shouldSkipLiteral(literalText) {
+				hc.log.Info("literal text indicates no update for batch", "job_id", jobID, "batch_num", i+1)
+				hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
+					job.SuccessfulBatches++
+					job.ProcessedBatches++
+				})
+				continue
+			}
+
 			// Trim context and update with OpenRouter
 			trimmedContext := hc.trimContext(transcriptContext, 1000)
-			updatedTranscript, err := hc.updateTranscriptWithContext(trimmedContext, literalText)
+			updatedTranscript, newSegment, err := hc.updateTranscriptWithContext(trimmedContext, literalText)
 			if err != nil {
 				hc.log.Warn("failed to update transcript, using literal", "job_id", jobID, "error", err)
-				// Fallback to literal text
-				updatedTranscript = strings.TrimSpace(trimmedContext + " " + literalText)
+				newSegment = strings.TrimSpace(literalText)
+				updatedTranscript = combineTranscript(trimmedContext, newSegment)
+			}
+
+			if strings.TrimSpace(newSegment) == "" {
+				hc.log.Info("no new transcript segment generated", "job_id", jobID, "batch_num", i+1)
+				hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
+					job.SuccessfulBatches++
+					job.ProcessedBatches++
+				})
+				continue
 			}
 
 			// Update running context
@@ -223,9 +243,7 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 				job.SuccessfulBatches++
 				job.ProcessedBatches++
 			})
-			if literalText != "" {
-				hc.jobManager.AddTranscriptionResult(jobID, literalText)
-			}
+			hc.jobManager.AddTranscriptionResult(jobID, newSegment)
 		}
 
 		time.Sleep(100 * time.Millisecond)
@@ -234,7 +252,8 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 	// Use the final improved context as full text
 	hc.jobManager.CompleteJob(jobID, transcriptContext)
 
-	hc.log.Info("video processing completed", "job_id", jobID, "total_frames", len(frames), "successful_batches", hc.jobManager.jobs[jobID].SuccessfulBatches)
+	job, _ := hc.jobManager.GetJob(jobID)
+	hc.log.Info("video processing completed", "job_id", jobID, "total_frames", len(frames), "successful_batches", job.SuccessfulBatches)
 }
 
 // GetJobStatus godoc
@@ -260,98 +279,46 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 // @Router /job/{id} [get]
 func (hc *HandlersConfig) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "id")
+	hc.log.Info("getting job status AHHAHAHAHHA", "job_id", jobID)
+
+	// Debug logging - safely access route context
+	rctx := chi.RouteContext(r.Context())
+	var paramKeys, paramValues []string
+	if rctx != nil && rctx.URLParams.Keys != nil {
+		paramKeys = rctx.URLParams.Keys
+		paramValues = rctx.URLParams.Values
+	}
+
+	hc.log.Info("getting job status",
+		"job_id", jobID,
+		"request_path", r.URL.Path,
+		"request_url", r.URL.String(),
+		"param_keys_count", len(paramKeys),
+		"param_values_count", len(paramValues))
 
 	job, exists := hc.jobManager.GetJob(jobID)
 	if !exists {
-		http.Error(w, "job not found", http.StatusNotFound)
+		hc.log.Error("job not found", "job_id", jobID, "all_jobs_count", len(hc.jobManager.GetAllJobs()))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "job not found"})
 		return
 	}
+
+	hc.log.Info("job found", "job_id", jobID, "status", job.Status)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(job)
 }
 
-func (hc *HandlersConfig) sendFrameBatchToDemoAPIWithResponse(frames [][]byte) (string, error) {
-	if hc.useMock {
-		mockText := fmt.Sprintf("Mock transcription for batch of %d frames. This is test data.", len(frames))
-		hc.log.Info("returning mock data", "text_length", len(mockText))
-		return mockText, nil
-	}
+// ListJobs returns all jobs (for debugging)
+func (hc *HandlersConfig) ListJobs(w http.ResponseWriter, r *http.Request) {
+	jobs := hc.jobManager.GetAllJobs()
+	hc.log.Info("listing all jobs", "count", len(jobs))
 
-	payload := map[string]interface{}{
-		"frames": frames,
-		"count":  len(frames),
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal frames: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", hc.demoAPIURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return "", fmt.Errorf("demo API returned error status: %d", resp.StatusCode)
-	}
-
-	var apiResp WebSocketMessage
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		hc.log.Warn("failed to decode demo API response", "error", err)
-		return "", nil
-	}
-
-	hc.log.Info("successfully sent batch to demo API", "status", resp.StatusCode, "text_length", len(apiResp.Text))
-	return apiResp.Text, nil
-}
-
-// sendFrameBatchToDemoAPI sends a batch of frames to the demo API
-func (hc *HandlersConfig) sendFrameBatchToDemoAPI(frames [][]byte) error {
-	payload := map[string]interface{}{
-		"frames": frames,
-		"count":  len(frames),
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal frames: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", hc.demoAPIURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return fmt.Errorf("demo API returned error status: %d", resp.StatusCode)
-	}
-
-	hc.log.Info("successfully sent batch to demo API", "status", resp.StatusCode)
-	return nil
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"count": len(jobs),
+		"jobs":  jobs,
+	})
 }

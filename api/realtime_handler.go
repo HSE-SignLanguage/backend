@@ -1,13 +1,13 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"streaming/config"
 	"streaming/logger"
+	"streaming/mlclient"
 	"streaming/utils"
 	"strings"
 	"sync"
@@ -21,17 +21,19 @@ const (
 )
 
 type HandlersConfig struct {
-	log        *logger.MultiLogger
-	demoAPIURL string
-	jobManager *JobManager
-	useMock    bool
+	log           *logger.MultiLogger
+	demoAPIURL    string
+	jobManager    *JobManager
+	useMock       bool
+	mlClient      *mlclient.Client
+	useOpenRouter bool
 }
 
 func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
-	demoAPIURL, err := config.GetEnv("DEMO_API_URL")
+	mlAPIURL, err := config.GetEnv("ML_API_URL")
 	if err != nil {
-		log.Warn("DEMO_API_URL not set, using default", "error", err)
-		demoAPIURL = "http://localhost:8080/process"
+		log.Warn("ML_API_URL not set, using default", "error", err)
+		mlAPIURL = "http://localhost:8080/process"
 	}
 
 	useMock := false
@@ -39,15 +41,32 @@ func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
 		useMock = mockEnv == "true" || mockEnv == "1"
 	}
 
+	useOpenRouter := true
+	if orEnv, err := config.GetEnv("USE_OPENROUTER"); err == nil {
+		envVal := strings.ToLower(orEnv)
+		useOpenRouter = envVal == "true" || envVal == "1" || envVal == "yes"
+	}
+
 	if useMock {
 		log.Info("Mock mode enabled - will return test data")
 	}
 
+	if !useOpenRouter {
+		log.Info("OpenRouter transcript improvement disabled via USE_OPENROUTER")
+	}
+
+	client, err := mlclient.NewClient(mlAPIURL)
+	if err != nil {
+		log.Fatal("failed to initialise ML API client", "error", err, "url", mlAPIURL)
+	}
+
 	return &HandlersConfig{
-		log:        log,
-		demoAPIURL: demoAPIURL,
-		jobManager: NewJobManager(),
-		useMock:    useMock,
+		log:           log,
+		demoAPIURL:    mlAPIURL,
+		jobManager:    NewJobManager(),
+		useMock:       useMock,
+		mlClient:      client,
+		useOpenRouter: useOpenRouter,
 	}
 }
 
@@ -163,80 +182,47 @@ func (hc *HandlersConfig) handleFrameStream(ctx context.Context, c *websocket.Co
 func (hc *HandlersConfig) sendFramesToAPI(ctx context.Context, frames [][]byte, c *websocket.Conn, writeMu *sync.Mutex, transcriptContext *string) {
 	hc.log.Info("sending batch of frames to API", "count", len(frames), "url", hc.demoAPIURL)
 
-	var literalText string
-	if hc.useMock {
-		literalText = fmt.Sprintf("new literal text chunk %d", time.Now().Unix())
-		hc.log.Debug("using mock literal text")
-	} else {
-		var err error
-		literalText, err = hc.getRawLiteralFromAPI(frames)
-		if err != nil {
-			hc.log.Error("failed to get literal from demo API", "error", err)
-			return
-		}
+	mockText := fmt.Sprintf("new literal text chunk %d", time.Now().Unix())
+	literalText, err := hc.requestLiteralText(ctx, frames, mockText)
+	if err != nil {
+		hc.log.Error("failed to get literal from demo API", "error", err)
+		return
 	}
 
+	literalText = strings.TrimSpace(literalText)
 	if literalText == "" {
 		hc.log.Warn("API returned empty text")
 		return
 	}
 
-	trimmedContext := hc.trimContext(*transcriptContext, maxContextChars)
+	if shouldSkipLiteral(literalText) {
+		hc.log.Info("literal text indicates no update, skipping send")
+		return
+	}
 
-	updatedTranscript, err := hc.updateTranscriptWithContext(trimmedContext, literalText)
+	previousTranscript := *transcriptContext
+	trimmedContext := hc.trimContext(previousTranscript, maxContextChars)
+
+	updatedTranscript, newSegment, err := hc.updateTranscriptWithContext(trimmedContext, literalText)
 	if err != nil {
 		hc.log.Error("failed to update transcript", "error", err)
-		updatedTranscript = strings.TrimSpace(trimmedContext + " " + literalText)
+		newSegment = strings.TrimSpace(literalText)
+		updatedTranscript = combineTranscript(trimmedContext, newSegment)
+	}
+
+	if strings.TrimSpace(newSegment) == "" {
+		hc.log.Debug("no new transcript segment to send")
+		return
 	}
 
 	*transcriptContext = updatedTranscript
 
-	response := WebSocketMessage{Text: updatedTranscript}
+	response := WebSocketMessage{Text: newSegment}
 	if err := hc.sendTextToClient(ctx, c, writeMu, response); err != nil {
 		hc.log.Error("failed to send text to websocket client", "error", err)
 	}
 
-	hc.log.Info("successfully processed and sent transcript", "context_length", len(updatedTranscript))
-}
-
-func (hc *HandlersConfig) getRawLiteralFromAPI(frames [][]byte) (string, error) {
-	payload := map[string]interface{}{
-		"frames": frames,
-		"count":  len(frames),
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("marshal frames: %w", err)
-	}
-
-	requestCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(requestCtx, "POST", hc.demoAPIURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return "", fmt.Errorf("API returned status %d", resp.StatusCode)
-	}
-
-	var apiResp WebSocketMessage
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
-	}
-
-	return apiResp.Text, nil
+	hc.log.Info("successfully processed and sent transcript segment", "segment_length", len(newSegment))
 }
 
 func (hc *HandlersConfig) trimContext(context string, maxChars int) string {
@@ -246,15 +232,35 @@ func (hc *HandlersConfig) trimContext(context string, maxChars int) string {
 	return context[len(context)-maxChars:]
 }
 
-func (hc *HandlersConfig) updateTranscriptWithContext(context, newLiteral string) (string, error) {
-	if hc.useMock {
-		if context == "" {
-			return "Mock transcript: " + newLiteral, nil
-		}
-		return context + " " + newLiteral, nil
+func (hc *HandlersConfig) updateTranscriptWithContext(context, newLiteral string) (string, string, error) {
+	chunk := strings.TrimSpace(newLiteral)
+
+	if chunk == "" {
+		return strings.TrimSpace(context), "", nil
 	}
 
-	return utils.UpdateTranscript(context, newLiteral)
+	if hc.useMock {
+		if context == "" {
+			chunk = "Mock transcript: " + chunk
+		}
+		return combineTranscript(context, chunk), chunk, nil
+	}
+
+	if !hc.useOpenRouter {
+		return combineTranscript(context, chunk), chunk, nil
+	}
+
+	improvedChunk, err := utils.UpdateTranscript(context, newLiteral)
+	if err != nil {
+		return "", "", err
+	}
+
+	improvedChunk = strings.TrimSpace(improvedChunk)
+	if improvedChunk == "" {
+		return strings.TrimSpace(context), "", nil
+	}
+
+	return combineTranscript(context, improvedChunk), improvedChunk, nil
 }
 
 func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Conn, writeMu *sync.Mutex, message WebSocketMessage) error {
@@ -267,4 +273,31 @@ func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Con
 	}
 
 	return c.Write(ctx, websocket.MessageText, data)
+}
+
+func (hc *HandlersConfig) requestLiteralText(ctx context.Context, frames [][]byte, mockText string) (string, error) {
+	if len(frames) == 0 {
+		return "", fmt.Errorf("no frames to send to ML API")
+	}
+
+	if hc.useMock {
+		hc.log.Debug("using mock literal text")
+		return mockText, nil
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if hc.mlClient == nil {
+		return "", fmt.Errorf("ml client is not configured")
+	}
+
+	text, err := hc.mlClient.ProcessFrames(ctx, frames)
+	if err != nil {
+		return "", fmt.Errorf("call ml api: %w", err)
+	}
+
+	hc.log.Info("received literal text from ML API", "text_length", len(text))
+	return text, nil
 }

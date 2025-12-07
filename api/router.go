@@ -4,8 +4,8 @@ import (
 	"streaming/logger"
 	"time"
 
-	"github.com/go-chi/chi/middleware"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
 	httpSwagger "github.com/swaggo/http-swagger"
 )
@@ -16,6 +16,7 @@ func NewRouter(log *logger.MultiLogger) *chi.Mux {
 
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
 	r.Use(httprate.Limit(
 		20,
 		5*time.Second,
@@ -33,6 +34,7 @@ func NewRouter(log *logger.MultiLogger) *chi.Mux {
 	r.Get("/socket", handlers.VideoSocketHandler)
 	r.Post("/upload", handlers.VideoUploadHandler)
 	r.Get("/job/{id}", handlers.GetJobStatus)
+	r.Get("/jobs", handlers.ListJobs)
 
 	return r
 }
