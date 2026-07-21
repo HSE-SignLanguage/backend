@@ -11,10 +11,18 @@ import (
 )
 
 func NewRouter(log *logger.MultiLogger) *chi.Mux {
+	router, _ := NewRouterWithHandlers(log)
+	return router
+}
+
+// NewRouterWithHandlers returns both the HTTP router and the lifecycle owner
+// required to drain upgraded sockets and detached workers during shutdown.
+func NewRouterWithHandlers(log *logger.MultiLogger) (*chi.Mux, *HandlersConfig) {
 	handlers := NewHandlersConfig(log)
 	r := chi.NewRouter()
 
 	r.Use(middleware.Recoverer)
+	r.Use(securityHeaders)
 	r.Use(trustedRealIPMiddleware(log))
 	r.Use(middleware.Logger)
 	r.Use(httprate.Limit(
@@ -35,5 +43,5 @@ func NewRouter(log *logger.MultiLogger) *chi.Mux {
 	r.Post("/upload", handlers.VideoUploadHandler)
 	r.Get("/job/{id}", handlers.GetJobStatus)
 
-	return r
+	return r, handlers
 }

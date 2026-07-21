@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const shutdownTimeout = 30 * time.Second
+
 // @title Video Streaming API
 // @version 1.0
 // @description API for video frame streaming and processing via WebSocket and video upload
@@ -24,9 +26,8 @@ import (
 // @license.name Apache 2.0
 // @license.url http://www.apache.org/licenses/LICENSE-2.0.html
 
-// @host localhost:8080
-// @BasePath /
-// @schemes http ws
+// @BasePath /api
+// @schemes http https ws wss
 
 func main() {
 	logger, err := logger.New("")
@@ -40,8 +41,8 @@ func main() {
 	docs.SwaggerInfo.BasePath = config.SwaggerBasePath
 	docs.SwaggerInfo.Schemes = config.SwaggerSchemes
 
-	router := api.NewRouter(logger)
-	server := api.NewServer(config.Port, logger, router)
+	router, handlers := api.NewRouterWithHandlers(logger)
+	server := api.NewServer(config.Port, logger, router, handlers)
 
 	go server.Start()
 
@@ -49,7 +50,7 @@ func main() {
 	defer stop()
 	<-shutdownSignal.Done()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := server.Stop(shutdownCtx); err != nil {
 		logger.Error("failed to stop server gracefully", "error", err)

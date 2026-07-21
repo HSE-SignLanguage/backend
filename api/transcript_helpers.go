@@ -16,11 +16,8 @@ func combineTranscript(context, literal string) string {
 	}
 }
 
-func appendTranscriptDelta(context, literal, delta string) (string, string) {
+func appendTranscriptDelta(context, delta string) (string, string) {
 	delta = strings.TrimSpace(delta)
-	if delta == "" {
-		delta = strings.TrimSpace(literal)
-	}
 	return combineTranscript(context, delta), delta
 }
 

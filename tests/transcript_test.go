@@ -107,6 +107,39 @@ func TestUpdateTranscriptSuccess(t *testing.T) {
 	}
 }
 
+func TestUpdateTranscriptAcceptsSuccessfulNoOp(t *testing.T) {
+	structuredContent, err := json.Marshal(utils.TranscriptUpdate{
+		FullText: "готовый текст",
+		Delta:    "",
+	})
+	if err != nil {
+		t.Fatalf("failed to encode fixture: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]any{"role": "assistant", "content": string(structuredContent)},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	restore := utils.SetOpenRouterURLForTest(server.URL)
+	defer restore()
+	t.Setenv("OPENROUTER_API_KEY", "test-key")
+	t.Setenv("OPENROUTER_MODEL", "test-model")
+
+	result, err := utils.UpdateTranscript(context.Background(), "готовый текст", "сомнительный жест")
+	if err != nil {
+		t.Fatalf("expected successful no-op, got %v", err)
+	}
+	if result.FullText != "готовый текст" || result.Delta != "" {
+		t.Fatalf("unexpected no-op result: %#v", result)
+	}
+}
+
 func TestUpdateTranscriptRejectsNonAppendOnlyResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		content, err := json.Marshal(utils.TranscriptUpdate{

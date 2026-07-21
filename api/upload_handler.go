@@ -55,7 +55,8 @@ const (
 // @Description // 1. Upload video
 // @Description const formData = new FormData();
 // @Description formData.append('video', videoFile);
-// @Description const uploadResp = await fetch('http://localhost:8080/upload', {
+// @Description const apiBase = '/api';
+// @Description const uploadResp = await fetch(`${apiBase}/upload`, {
 // @Description   method: 'POST',
 // @Description   body: formData
 // @Description });
@@ -63,7 +64,7 @@ const (
 // @Description
 // @Description // 2. Poll for results
 // @Description const pollInterval = setInterval(async () => {
-// @Description   const statusResp = await fetch(`http://localhost:8080/job/${job_id}`);
+// @Description   const statusResp = await fetch(`${apiBase}/job/${job_id}`);
 // @Description   const job = await statusResp.json();
 // @Description
 // @Description   if (job.status === 'completed') {
@@ -85,10 +86,17 @@ const (
 // @Failure 413 {object} map[string]string "Video exceeds 100 MiB"
 // @Failure 415 {object} map[string]string "Unsupported or invalid video"
 // @Failure 429 {object} map[string]string "Video processor is busy"
-// @Failure 503 {object} map[string]string "Upload capacity exhausted"
+// @Failure 503 {object} map[string]string "Upload capacity exhausted or server draining"
 // @Failure 500 {object} map[string]string "Internal Server Error"
 // @Router /upload [post]
 func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Request) {
+	if !hc.lifecycle.tryBeginWork() {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer hc.lifecycle.endWork()
+
 	if !hc.tryAcquireUploadSlot() {
 		w.Header().Set("Retry-After", "5")
 		http.Error(w, "upload capacity exhausted, retry later", http.StatusServiceUnavailable)
@@ -103,6 +111,11 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 	defer responseController.SetReadDeadline(time.Time{})
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodyBytes)
+	uploadBody := r.Body
+	stopLifecycleBodyClose := context.AfterFunc(hc.lifecycle.context(), func() {
+		_ = uploadBody.Close()
+	})
+	defer stopLifecycleBodyClose()
 	if err := r.ParseMultipartForm(multipartMemoryBytes); err != nil {
 		hc.log.Error("failed to parse multipart form", "error", err, "content_type", r.Header.Get("Content-Type"))
 		var maxBytesError *http.MaxBytesError
@@ -181,7 +194,11 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 	// ffprobe is the source of truth for supported containers and video
 	// streams. MIME sniffing rejects valid MOV files and can accept a forged
 	// signature without proving the payload is actually decodable.
-	extractor, err := utils.NewVideoFrameExtractor(tempFilePath)
+	validationCtx, cancelValidation := context.WithCancel(r.Context())
+	stopLifecycleCancellation := context.AfterFunc(hc.lifecycle.context(), cancelValidation)
+	extractor, err := utils.NewVideoFrameExtractorContext(validationCtx, tempFilePath)
+	stopLifecycleCancellation()
+	cancelValidation()
 	if err != nil {
 		os.Remove(tempFilePath)
 		hc.log.Warn("rejected uploaded video", "filename", filename, "error", err)
@@ -196,10 +213,22 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "video processor is busy, retry later", http.StatusTooManyRequests)
 		return
 	}
+	if !hc.lifecycle.tryBeginWork() {
+		extractor.Close()
+		os.Remove(tempFilePath)
+		hc.releaseJobSlot()
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
 	slotTransferred := false
+	workTransferred := false
 	defer func() {
 		if !slotTransferred {
 			hc.releaseJobSlot()
+		}
+		if !workTransferred {
+			hc.lifecycle.endWork()
 		}
 	}()
 
@@ -209,7 +238,11 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 
 	// Start async processing
 	slotTransferred = true
-	go hc.processVideoAsync(jobID, tempFilePath, interval, extractor)
+	workTransferred = true
+	go func() {
+		defer hc.lifecycle.endWork()
+		hc.processVideoAsync(jobID, tempFilePath, interval, extractor)
+	}()
 
 	// Return immediately with job ID
 	response := map[string]interface{}{
@@ -278,7 +311,7 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, requeste
 	defer hc.releaseJobSlot()
 	defer extractor.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), maxJobProcessingTime)
+	ctx, cancel := context.WithTimeout(hc.lifecycle.context(), maxJobProcessingTime)
 	defer cancel()
 
 	hc.log.Info("starting video processing", "job_id", jobID)
@@ -297,9 +330,18 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, requeste
 	// Automatically increase the sampling interval for longer/high-FPS videos
 	// so the documented two-minute input limit does not exceed the bounded
 	// extraction budget.
-	frames, err := extractor.ExtractFramesWithInterval(interval)
+	frames, err := extractor.ExtractFramesWithIntervalContext(ctx, interval)
 
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			hc.log.Info("video processing cancelled during shutdown", "job_id", jobID)
+			hc.jobManager.FailJob(jobID, "server shut down before video processing completed")
+			return
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			hc.jobManager.FailJob(jobID, "video processing timed out")
+			return
+		}
 		hc.log.Error("failed to extract frames", "job_id", jobID, "error", err)
 		hc.jobManager.FailJob(jobID, fmt.Sprintf("failed to extract frames: %v", err))
 		return
@@ -330,7 +372,7 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, requeste
 	var stabilizer predictionStabilizer
 	for i, batch := range batches {
 		if err := ctx.Err(); err != nil {
-			hc.jobManager.FailJob(jobID, "video processing timed out")
+			hc.failCancelledVideoJob(jobID, err)
 			return
 		}
 
@@ -370,11 +412,9 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, requeste
 				continue
 			}
 
-			updatedTranscript, newSegment, err := hc.updateTranscriptWithContext(ctx, transcriptContext, literalText)
+			updatedTranscript, newSegment, err := hc.updateUploadTranscript(ctx, transcriptContext, literalText)
 			if err != nil {
 				hc.log.Warn("failed to update transcript, using literal", "job_id", jobID, "error", err)
-				newSegment = strings.TrimSpace(literalText)
-				updatedTranscript = combineTranscript(transcriptContext, newSegment)
 			}
 
 			if strings.TrimSpace(newSegment) == "" {
@@ -398,7 +438,7 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, requeste
 
 	}
 	if err := ctx.Err(); err != nil {
-		hc.jobManager.FailJob(jobID, "video processing timed out")
+		hc.failCancelledVideoJob(jobID, err)
 		return
 	}
 
@@ -413,6 +453,26 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, requeste
 
 	job, _ := hc.jobManager.GetJob(jobID)
 	hc.log.Info("video processing completed", "job_id", jobID, "total_frames", len(frames), "successful_batches", job.SuccessfulBatches)
+}
+
+// updateUploadTranscript applies the legacy per-literal formatter contract.
+// A valid empty delta is an intentional no-op. Only an actual formatter error
+// falls back to the accepted ML literal.
+func (hc *HandlersConfig) updateUploadTranscript(ctx context.Context, current, literal string) (string, string, error) {
+	updated, segment, err := hc.updateTranscriptWithContext(ctx, current, literal)
+	if err == nil {
+		return updated, segment, nil
+	}
+	fallback := strings.TrimSpace(literal)
+	return combineTranscript(current, fallback), fallback, err
+}
+
+func (hc *HandlersConfig) failCancelledVideoJob(jobID string, err error) {
+	if errors.Is(err, context.Canceled) {
+		hc.jobManager.FailJob(jobID, "server shut down before video processing completed")
+		return
+	}
+	hc.jobManager.FailJob(jobID, "video processing timed out")
 }
 
 // GetJobStatus godoc

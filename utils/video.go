@@ -51,11 +51,18 @@ type VideoFrameExtractor struct {
 }
 
 func NewVideoFrameExtractor(filePath string) (*VideoFrameExtractor, error) {
+	return NewVideoFrameExtractorContext(context.Background(), filePath)
+}
+
+// NewVideoFrameExtractorContext validates video metadata with a cancellable
+// ffprobe process. This lets request cancellation and server shutdown terminate
+// validation without leaving a child process behind.
+func NewVideoFrameExtractorContext(ctx context.Context, filePath string) (*VideoFrameExtractor, error) {
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("video file does not exist: %s", filePath)
 	}
 
-	info, err := getVideoInfo(filePath)
+	info, err := getVideoInfoContext(ctx, filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get video info: %w", err)
 	}
@@ -70,7 +77,14 @@ func NewVideoFrameExtractor(filePath string) (*VideoFrameExtractor, error) {
 }
 
 func getVideoInfo(filePath string) (map[string]interface{}, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), ffprobeTimeout)
+	return getVideoInfoContext(context.Background(), filePath)
+}
+
+func getVideoInfoContext(ctx context.Context, filePath string) (map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, ffprobeTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "ffprobe",
@@ -183,6 +197,13 @@ func (vfe *VideoFrameExtractor) EffectiveFrameInterval(requested int) int {
 }
 
 func (vfe *VideoFrameExtractor) ExtractFramesWithInterval(interval int) ([][]byte, error) {
+	return vfe.ExtractFramesWithIntervalContext(context.Background(), interval)
+}
+
+// ExtractFramesWithIntervalContext runs FFmpeg under both its normal runtime
+// bound and the caller lifecycle. Cancelling the context kills the process and
+// still executes temporary-directory cleanup before returning.
+func (vfe *VideoFrameExtractor) ExtractFramesWithIntervalContext(ctx context.Context, interval int) ([][]byte, error) {
 	if interval < 1 {
 		interval = 1
 	}
@@ -215,7 +236,10 @@ func (vfe *VideoFrameExtractor) ExtractFramesWithInterval(interval int) ([][]byt
 		outputPattern,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), ffmpegTimeout)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, ffmpegTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
@@ -236,6 +260,9 @@ func (vfe *VideoFrameExtractor) ExtractFramesWithInterval(interval int) ([][]byt
 
 	frames := make([][]byte, 0, len(files))
 	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		frameData, err := os.ReadFile(file)
 		if err != nil {
 			continue

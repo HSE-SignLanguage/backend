@@ -40,6 +40,12 @@ const docTemplate = `{
                         "schema": {
                             "type": "string"
                         }
+                    },
+                    "503": {
+                        "description": "Server is draining",
+                        "schema": {
+                            "type": "string"
+                        }
                     }
                 }
             }
@@ -84,7 +90,7 @@ const docTemplate = `{
         },
         "/socket": {
             "get": {
-                "description": "Establishes a WebSocket connection for receiving video frames. Send binary frames to the server, and receive text responses back.\n\n**Client Flow:**\n1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)\n2. Send video frames as binary messages (MessageBinary)\n3. Server buffers frames and sends batches of 32 to processing API\n4. Receive ordered gesture, formatting, and transcript events as JSON text messages\n\n**Two-layer transcript:**\nEvery stable gesture is emitted immediately as type=gesture with status=draft. Stable gestures are grouped after 3 seconds of idle time or 6 tokens. A type=formatting event marks a segment being processed. The final type=transcript event replaces that segment's raw draft with enhanced or literal text. OpenRouter never blocks newer gesture events.\n\n**Gesture event:**\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"type\": \"gesture\", \"status\": \"draft\", \"text\": \"работать\",\n\"final_text\": \"\", \"draft_text\": \"я работать\", \"full_text\": \"я работать\", \"literal_text\": \"я работать\",\n\"confidence\": 0.91, \"sequence\": 2, \"segment_id\": 1\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Final segment event:**\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"type\": \"transcript\", \"status\": \"enhanced\", \"enhanced\": true,\n\"text\": \"Я работаю.\", \"final_text\": \"Я работаю.\", \"draft_text\": \"\",\n\"full_text\": \"Я работаю.\", \"literal_text\": \"я работать\", \"sequence\": 2, \"segment_id\": 1,\n\"first_sequence\": 1, \"last_sequence\": 2, \"token_count\": 2,\n\"confidence\": 0.91\n}\n` + "`" + `` + "`" + `` + "`" + `\nfull_text is the authoritative rendered snapshot and equals finalized presentation text followed by all raw draft tokens. literal_text independently preserves recognizer-only output. text and confidence remain for compatibility. Sequences and segment IDs are monotonic per connection. truncated=true means the bounded session discarded its oldest finalized prefix.\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\nconst ws = new WebSocket('ws://localhost:8080/socket');\n\n// Send binary frame data\nws.send(frameDataBlob);\n\n// Receive text messages\nws.onmessage = (event) =\u003e {\nconst data = JSON.parse(event.data);\nconsole.log('Received text:', data.text);\n};\n` + "`" + `` + "`" + `` + "`" + `",
+                "description": "Establishes a WebSocket connection for receiving video frames. Send binary frames to the server, and receive text responses back.\n\n**Client Flow:**\n1. Connect to same-origin ` + "`" + `/api/socket` + "`" + ` using ` + "`" + `wss:` + "`" + ` on HTTPS pages and ` + "`" + `ws:` + "`" + ` otherwise\n2. Send video frames as binary messages (MessageBinary)\n3. Server buffers frames and sends batches of 32 to processing API\n4. Receive ordered gesture, formatting, and transcript events as JSON text messages\n\n**Two-layer transcript:**\nEvery stable gesture is emitted immediately as type=gesture with status=draft. Stable gestures are grouped after 3 seconds of idle time or 6 tokens. A type=formatting event marks a segment being processed. The final type=transcript event replaces that segment's raw draft with enhanced or literal text. OpenRouter never blocks newer gesture events.\n\n**Gesture event:**\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"type\": \"gesture\", \"status\": \"draft\", \"text\": \"работать\",\n\"final_text\": \"\", \"draft_text\": \"я работать\", \"full_text\": \"я работать\", \"literal_text\": \"я работать\",\n\"confidence\": 0.91, \"sequence\": 2, \"segment_id\": 1\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Final segment event:**\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"type\": \"transcript\", \"status\": \"enhanced\", \"enhanced\": true,\n\"text\": \"Я работаю.\", \"final_text\": \"Я работаю.\", \"draft_text\": \"\",\n\"full_text\": \"Я работаю.\", \"literal_text\": \"я работать\", \"sequence\": 2, \"segment_id\": 1,\n\"first_sequence\": 1, \"last_sequence\": 2, \"token_count\": 2,\n\"confidence\": 0.91\n}\n` + "`" + `` + "`" + `` + "`" + `\nfull_text is the authoritative rendered snapshot and equals finalized presentation text followed by all raw draft tokens. literal_text independently preserves recognizer-only output. text and confidence remain for compatibility. Sequences and segment IDs are monotonic per connection. truncated=true means the bounded session discarded its oldest finalized prefix.\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\nconst wsURL = new URL('/api/socket', window.location.origin);\nwsURL.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';\nconst ws = new WebSocket(wsURL);\n\n// Send binary frame data\nws.send(frameDataBlob);\n\n// Receive text messages\nws.onmessage = (event) =\u003e {\nconst data = JSON.parse(event.data);\nconsole.log('Received text:', data.text);\n};\n` + "`" + `` + "`" + `` + "`" + `",
                 "consumes": [
                     "application/octet-stream"
                 ],
@@ -107,13 +113,19 @@ const docTemplate = `{
                         "schema": {
                             "type": "string"
                         }
+                    },
+                    "503": {
+                        "description": "WebSocket capacity exhausted or server draining",
+                        "schema": {
+                            "type": "string"
+                        }
                     }
                 }
             }
         },
         "/upload": {
             "post": {
-                "description": "Upload a video file and receive a job ID immediately. The video will be processed asynchronously in batches of 32 frames.\n\n**Process Flow:**\n1. Upload video file via multipart form data\n2. Receive job ID immediately (status: queued)\n3. Server processes video in background\n4. Poll /job/{id} endpoint to check status and get results\n5. When complete, full transcription is available\n\n**Immediate Response Format:**\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"job_id\": \"550e8400-e29b-41d4-a716-446655440000\",\n\"status\": \"queued\",\n\"message\": \"Video upload accepted, processing started\"\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\n// 1. Upload video\nconst formData = new FormData();\nformData.append('video', videoFile);\nconst uploadResp = await fetch('http://localhost:8080/upload', {\nmethod: 'POST',\nbody: formData\n});\nconst { job_id } = await uploadResp.json();\n\n// 2. Poll for results\nconst pollInterval = setInterval(async () =\u003e {\nconst statusResp = await fetch(` + "`" + `http://localhost:8080/job/${job_id}` + "`" + `);\nconst job = await statusResp.json();\n\nif (job.status === 'completed') {\nconsole.log('Transcription:', job.full_text);\nclearInterval(pollInterval);\n} else if (job.status === 'failed') {\nconsole.error('Processing failed:', job.error);\nclearInterval(pollInterval);\n}\n}, 2000);\n` + "`" + `` + "`" + `` + "`" + `",
+                "description": "Upload a video file and receive a job ID immediately. The video will be processed asynchronously in batches of 32 frames.\n\n**Process Flow:**\n1. Upload video file via multipart form data\n2. Receive job ID immediately (status: queued)\n3. Server processes video in background\n4. Poll /job/{id} endpoint to check status and get results\n5. When complete, full transcription is available\n\n**Immediate Response Format:**\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"job_id\": \"550e8400-e29b-41d4-a716-446655440000\",\n\"status\": \"queued\",\n\"message\": \"Video upload accepted, processing started\"\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\n// 1. Upload video\nconst formData = new FormData();\nformData.append('video', videoFile);\nconst apiBase = '/api';\nconst uploadResp = await fetch(` + "`" + `${apiBase}/upload` + "`" + `, {\nmethod: 'POST',\nbody: formData\n});\nconst { job_id } = await uploadResp.json();\n\n// 2. Poll for results\nconst pollInterval = setInterval(async () =\u003e {\nconst statusResp = await fetch(` + "`" + `${apiBase}/job/${job_id}` + "`" + `);\nconst job = await statusResp.json();\n\nif (job.status === 'completed') {\nconsole.log('Transcription:', job.full_text);\nclearInterval(pollInterval);\n} else if (job.status === 'failed') {\nconsole.error('Processing failed:', job.error);\nclearInterval(pollInterval);\n}\n}, 2000);\n` + "`" + `` + "`" + `` + "`" + `",
                 "consumes": [
                     "multipart/form-data"
                 ],
@@ -193,7 +205,7 @@ const docTemplate = `{
                         }
                     },
                     "503": {
-                        "description": "Upload capacity exhausted",
+                        "description": "Upload capacity exhausted or server draining",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -333,9 +345,9 @@ const docTemplate = `{
 // SwaggerInfo holds exported Swagger Info so clients can modify it
 var SwaggerInfo = &swag.Spec{
 	Version:          "1.0",
-	Host:             "localhost:8080",
-	BasePath:         "/",
-	Schemes:          []string{"http", "ws"},
+	Host:             "",
+	BasePath:         "/api",
+	Schemes:          []string{"http", "https", "ws", "wss"},
 	Title:            "Video Streaming API",
 	Description:      "API for video frame streaming and processing via WebSocket and video upload",
 	InfoInstanceName: "swagger",

@@ -206,6 +206,8 @@ Recognition remains an ML decision. For live sessions, OpenRouter receives an im
 
 Formatting is asynchronous and conservative: temperature zero, minimal reasoning effort, strict JSON Schema, echoed sequence validation, bounded request/response sizes, and a five-second timeout. Provider routing requires requested parameters, prefers latency, and allows failover. A response may return only the new segment; it cannot rewrite finalized context. Invalid, truncated, oversized, delayed/mismatched or unavailable output falls back to the exact literal segment. Uploaded-video jobs retain the legacy append-only per-literal cleanup contract.
 
+For uploaded video, a valid response with an empty `delta` is an intentional no-op: the existing transcript remains unchanged and the uncertain literal is not appended. Literal fallback is used only when the formatter request fails or its response violates the append-only contract.
+
 Set `USE_OPENROUTER=false` to keep all transcript processing local to the backend and ML service.
 
 ## Configuration
@@ -289,20 +291,21 @@ go vet ./...
 go build ./...
 ```
 
-The GitHub Actions workflow runs on pushes to `main` and pull requests with a 15-minute job timeout. Tests cover strict segment formatting, two-layer live ordering/snapshots/fallback, ML response/retry behavior, prediction stabilization, trusted-proxy resolution, video-job capacity, and exact/padded frame windowing.
+The GitHub Actions workflow runs on pushes to `main` and pull requests with a 15-minute job timeout. Tests cover strict segment formatting, valid OpenRouter no-op versus error fallback, two-layer live ordering/snapshots/fallback, coordinated shutdown, ML response/retry behavior, prediction stabilization, trusted-proxy resolution, video-job capacity, and exact/padded frame windowing.
 
 The real OpenRouter integration test is opt-in by the presence of both `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`. Remove those variables from the root `.env`—empty entries still count as present for this test—when an offline test run is intended.
 
 ## Security and reliability guardrails
 
 - per-IP HTTP rate limiting and canonical, trusted-proxy-aware client addresses;
+- centralized `nosniff`, clickjacking, referrer and browser-permission response headers, including Swagger and error responses;
 - global/per-IP WebSocket caps, frame/rate/idle limits and bounded latest-frame queues;
 - serialized ML access and bounded retry behavior for transient overload;
 - upload body/read deadlines, UUID temp paths, `0600` files, filename sanitization and `ffprobe` validation;
 - duration, resolution, frame-count, worker and job-time limits around FFmpeg;
 - bounded ML/OpenRouter response bodies, strict schema/sequence validation, and literal fallback;
 - non-root, read-only container runtime with dropped capabilities and bounded temporary storage;
-- panic recovery, HTTP server timeouts, structured logs, graceful HTTP shutdown and automatic cleanup of completed in-memory jobs after 24 hours.
+- panic recovery, HTTP server timeouts, structured logs, coordinated WebSocket/upload draining and automatic cleanup of completed in-memory jobs after 24 hours.
 
 ## Deployment checklist
 
@@ -313,14 +316,14 @@ The real OpenRouter integration test is opt-in by the presence of both `OPENROUT
 - Set exact `TRUSTED_PROXY_CIDRS` for the ingress network and ensure the proxy appends or overwrites forwarding headers safely.
 - Store OpenRouter credentials as deployment secrets. Disable OpenRouter if transcript text must not leave the private stack.
 - Give the ML service enough startup time and memory to load its model; backend health alone does not prove ML readiness.
-- Keep deployment stop grace time above the backend's ten-second HTTP shutdown budget, while accounting for the limitations below.
+- Keep the deployment stop grace time above the backend's 30-second shutdown budget (35 seconds or more is recommended). New WebSocket/upload work is rejected while draining; live sockets close immediately, active video jobs receive most of the budget to finish, and remaining ML/OpenRouter/FFmpeg work is then cancelled with time reserved for cleanup.
 
 ## Known limitations
 
 - The API has no authentication or authorization. Protect it at the gateway when videos or transcripts are sensitive.
 - There is no CORS middleware; the supported browser deployment is same-origin through `/api`.
 - Jobs and transcript state are in memory. A backend restart loses job status/results, and per-process limits are not shared across replicas.
-- `http.Server.Shutdown` does not drain upgraded WebSockets or detached upload workers; deployments interrupt active live sessions and jobs.
+- Graceful shutdown cannot preserve an in-progress live session across replicas. Active sockets receive a `Going Away` close and clients must reconnect; video jobs that exceed the bounded drain window are cancelled and their in-memory status disappears when the process exits.
 - The global ML slot and single upload worker intentionally favor stability over throughput. Busy instances return `429`/`503`.
 - OpenRouter formatting cannot repair an incorrectly recognized gesture; failed live segments commit their accepted raw literals.
 
