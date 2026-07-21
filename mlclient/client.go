@@ -35,6 +35,7 @@ type processResponse struct {
 	Confidence float64 `json:"confidence"`
 	Accepted   *bool   `json:"accepted"`
 	ClassID    *int    `json:"class_id"`
+	Reason     string  `json:"reason"`
 }
 
 // Prediction is the normalized ML response. Accepted defaults to true for
@@ -44,6 +45,7 @@ type Prediction struct {
 	Confidence float64 `json:"confidence"`
 	Accepted   bool    `json:"accepted"`
 	ClassID    *int    `json:"class_id,omitempty"`
+	Reason     string  `json:"reason,omitempty"`
 }
 
 type Client struct {
@@ -159,6 +161,7 @@ func (c *Client) processFramesOnce(ctx context.Context, bodyBytes []byte) (Predi
 		Confidence: parsed.Confidence,
 		Accepted:   accepted,
 		ClassID:    parsed.ClassID,
+		Reason:     strings.TrimSpace(parsed.Reason),
 	}, 0, false, nil
 }
 

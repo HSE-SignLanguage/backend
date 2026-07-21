@@ -433,11 +433,8 @@ func (hc *HandlersConfig) updateTranscriptWithContext(ctx context.Context, fullT
 	if err != nil {
 		return "", "", err
 	}
-	if update.Delta == "" {
-		return fullTranscript, "", nil
-	}
-
-	return combineTranscript(fullTranscript, update.Delta), update.Delta, nil
+	updatedTranscript, delta := appendTranscriptDelta(fullTranscript, chunk, update.Delta)
+	return updatedTranscript, delta, nil
 }
 
 func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Conn, message WebSocketMessage) error {
@@ -479,7 +476,12 @@ func (hc *HandlersConfig) requestPrediction(ctx context.Context, frames [][]byte
 		return mlclient.Prediction{}, fmt.Errorf("call ml api: %w", err)
 	}
 
-	hc.log.Debug("received prediction from ML API", "accepted", prediction.Accepted, "confidence", prediction.Confidence)
+	hc.log.Debug(
+		"received prediction from ML API",
+		"accepted", prediction.Accepted,
+		"confidence", prediction.Confidence,
+		"reason", prediction.Reason,
+	)
 	return prediction, nil
 }
 

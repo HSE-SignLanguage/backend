@@ -89,6 +89,7 @@ func TestProcessFramesReadsExtendedPrediction(t *testing.T) {
 			"confidence": 0.87,
 			"accepted":   false,
 			"class_id":   classID,
+			"reason":     "ambiguous",
 		})
 	}))
 	defer server.Close()
@@ -101,7 +102,7 @@ func TestProcessFramesReadsExtendedPrediction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("process frames: %v", err)
 	}
-	if prediction.Accepted || prediction.Confidence != 0.87 || prediction.ClassID == nil || *prediction.ClassID != classID {
+	if prediction.Accepted || prediction.Confidence != 0.87 || prediction.ClassID == nil || *prediction.ClassID != classID || prediction.Reason != "ambiguous" {
 		t.Fatalf("unexpected extended prediction: %#v", prediction)
 	}
 }
