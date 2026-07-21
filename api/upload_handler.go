@@ -86,7 +86,7 @@ const (
 // @Failure 413 {object} map[string]string "Video exceeds 100 MiB"
 // @Failure 415 {object} map[string]string "Unsupported or invalid video"
 // @Failure 429 {object} map[string]string "Video processor is busy"
-// @Failure 503 {object} map[string]string "Upload capacity exhausted or server draining"
+// @Failure 503 {object} map[string]string "Upload capacity exhausted, validation interrupted, or server draining"
 // @Failure 500 {object} map[string]string "Internal Server Error"
 // @Router /upload [post]
 func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Request) {
@@ -158,7 +158,7 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 		interval = parsedInterval
 	}
 
-	tempDir := filepath.Join("tmp", "uploads")
+	tempDir := hc.videoUploadTempDir()
 	if err := os.MkdirAll(tempDir, 0700); err != nil {
 		hc.log.Error("failed to create temp directory", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -196,13 +196,26 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 	// signature without proving the payload is actually decodable.
 	validationCtx, cancelValidation := context.WithCancel(r.Context())
 	stopLifecycleCancellation := context.AfterFunc(hc.lifecycle.context(), cancelValidation)
-	extractor, err := utils.NewVideoFrameExtractorContext(validationCtx, tempFilePath)
+	extractor, err := hc.newVideoFrameExtractor(validationCtx, tempFilePath)
 	stopLifecycleCancellation()
 	cancelValidation()
 	if err != nil {
 		os.Remove(tempFilePath)
-		hc.log.Warn("rejected uploaded video", "filename", filename, "error", err)
-		http.Error(w, "unsupported or invalid video", http.StatusUnsupportedMediaType)
+		status, retryAfter := classifyVideoValidationError(err, hc.lifecycle.isDraining())
+		if retryAfter != "" {
+			w.Header().Set("Retry-After", retryAfter)
+		}
+		switch status {
+		case http.StatusServiceUnavailable:
+			hc.log.Info("video validation interrupted", "filename", filename, "error", err)
+			http.Error(w, "video validation interrupted, retry later", status)
+		case http.StatusUnsupportedMediaType:
+			hc.log.Warn("rejected uploaded video", "filename", filename, "error", err)
+			http.Error(w, "unsupported or invalid video", status)
+		default:
+			hc.log.Error("video validation failed", "filename", filename, "error", err)
+			http.Error(w, "video validation unavailable", status)
+		}
 		return
 	}
 
@@ -256,6 +269,30 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 	json.NewEncoder(w).Encode(response)
 
 	hc.log.Info("video upload accepted", "job_id", jobID)
+}
+
+func (hc *HandlersConfig) videoUploadTempDir() string {
+	if hc.uploadTempDir != "" {
+		return hc.uploadTempDir
+	}
+	return filepath.Join("tmp", "uploads")
+}
+
+func (hc *HandlersConfig) newVideoFrameExtractor(ctx context.Context, filePath string) (*utils.VideoFrameExtractor, error) {
+	if hc.createExtractor != nil {
+		return hc.createExtractor(ctx, filePath)
+	}
+	return utils.NewVideoFrameExtractorContext(ctx, filePath)
+}
+
+func classifyVideoValidationError(err error, draining bool) (int, string) {
+	if draining || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusServiceUnavailable, "1"
+	}
+	if errors.Is(err, utils.ErrInvalidVideo) {
+		return http.StatusUnsupportedMediaType, ""
+	}
+	return http.StatusInternalServerError, ""
 }
 
 func (hc *HandlersConfig) tryAcquireJobSlot() bool {

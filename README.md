@@ -150,7 +150,7 @@ At most two uploads are validated concurrently and one video job is processed at
 }
 ```
 
-Relevant errors are `400` for invalid form fields, `408` for upload timeout, `413` for size, `415` for invalid/unsupported video, `429` when the video worker is busy, and `503` when upload validation capacity is full.
+Relevant errors are `400` for invalid form fields, `408` for upload timeout, `413` for size, `415` only when the media is invalid/unsupported, `429` when the video worker is busy, and `503` when upload validation is interrupted by shutdown/cancellation or its capacity is full. Retryable `503` responses include `Retry-After`.
 
 Example:
 

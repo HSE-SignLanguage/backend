@@ -35,18 +35,20 @@ const (
 )
 
 type HandlersConfig struct {
-	log            *logger.MultiLogger
-	jobManager     *JobManager
-	lifecycle      handlerLifecycle
-	useMock        bool
-	mlClient       *mlclient.Client
-	useOpenRouter  bool
-	jobSlots       chan struct{}
-	uploadSlots    chan struct{}
-	mlSlots        chan struct{}
-	webSocketSlots chan struct{}
-	webSocketMu    sync.Mutex
-	webSocketsByIP map[string]int
+	log             *logger.MultiLogger
+	jobManager      *JobManager
+	lifecycle       handlerLifecycle
+	useMock         bool
+	mlClient        *mlclient.Client
+	useOpenRouter   bool
+	jobSlots        chan struct{}
+	uploadSlots     chan struct{}
+	mlSlots         chan struct{}
+	webSocketSlots  chan struct{}
+	webSocketMu     sync.Mutex
+	webSocketsByIP  map[string]int
+	uploadTempDir   string
+	createExtractor func(context.Context, string) (*utils.VideoFrameExtractor, error)
 }
 
 func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
@@ -82,16 +84,17 @@ func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
 
 	jobManager := NewJobManager()
 	handlers := &HandlersConfig{
-		log:            log,
-		jobManager:     jobManager,
-		useMock:        useMock,
-		mlClient:       client,
-		useOpenRouter:  useOpenRouter,
-		jobSlots:       make(chan struct{}, maxConcurrentVideoJobs),
-		uploadSlots:    make(chan struct{}, maxConcurrentUploads),
-		mlSlots:        make(chan struct{}, maxConcurrentMLCalls),
-		webSocketSlots: make(chan struct{}, maxConcurrentSockets),
-		webSocketsByIP: make(map[string]int),
+		log:             log,
+		jobManager:      jobManager,
+		useMock:         useMock,
+		mlClient:        client,
+		useOpenRouter:   useOpenRouter,
+		jobSlots:        make(chan struct{}, maxConcurrentVideoJobs),
+		uploadSlots:     make(chan struct{}, maxConcurrentUploads),
+		mlSlots:         make(chan struct{}, maxConcurrentMLCalls),
+		webSocketSlots:  make(chan struct{}, maxConcurrentSockets),
+		webSocketsByIP:  make(map[string]int),
+		createExtractor: utils.NewVideoFrameExtractorContext,
 	}
 	go jobManager.RunCleanup(handlers.lifecycle.context(), time.Hour, 24*time.Hour)
 	return handlers

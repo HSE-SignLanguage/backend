@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -16,6 +17,11 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrInvalidVideo marks input that ffprobe successfully classified as invalid
+// or unsupported. Operational failures and context cancellation deliberately
+// do not wrap this sentinel so HTTP callers do not misreport them as HTTP 415.
+var ErrInvalidVideo = errors.New("invalid or unsupported video")
 
 const (
 	ffprobeTimeout          = 15 * time.Second
@@ -99,7 +105,11 @@ func getVideoInfoContext(ctx context.Context, filePath string) (map[string]inter
 		if contextErr := ctx.Err(); contextErr != nil {
 			return nil, fmt.Errorf("ffprobe timed out: %w", contextErr)
 		}
-		return nil, fmt.Errorf("ffprobe failed: %w", err)
+		var startError *exec.Error
+		if errors.As(err, &startError) {
+			return nil, fmt.Errorf("start ffprobe: %w", err)
+		}
+		return nil, fmt.Errorf("%w: ffprobe rejected input: %v", ErrInvalidVideo, err)
 	}
 
 	var probe ffprobeResult
@@ -115,14 +125,14 @@ func getVideoInfoContext(ctx context.Context, filePath string) (map[string]inter
 		}
 	}
 	if videoStream == nil {
-		return nil, fmt.Errorf("file contains no video stream")
+		return nil, fmt.Errorf("%w: file contains no video stream", ErrInvalidVideo)
 	}
 
 	fps, err := parseFrameRate(videoStream.AvgFrameRate)
 	if err != nil {
 		fps, err = parseFrameRate(videoStream.RealFrameRate)
 		if err != nil {
-			return nil, fmt.Errorf("invalid video frame rate: %w", err)
+			return nil, fmt.Errorf("%w: invalid video frame rate: %v", ErrInvalidVideo, err)
 		}
 	}
 
@@ -132,13 +142,13 @@ func getVideoInfoContext(ctx context.Context, filePath string) (map[string]inter
 	}
 	duration, err := strconv.ParseFloat(durationText, 64)
 	if err != nil || !isFinitePositive(duration) {
-		return nil, fmt.Errorf("invalid video duration")
+		return nil, fmt.Errorf("%w: invalid video duration", ErrInvalidVideo)
 	}
 	if duration > maxVideoDuration.Seconds() {
-		return nil, fmt.Errorf("video duration exceeds %.0f seconds", maxVideoDuration.Seconds())
+		return nil, fmt.Errorf("%w: video duration exceeds %.0f seconds", ErrInvalidVideo, maxVideoDuration.Seconds())
 	}
 	if videoStream.Width <= 0 || videoStream.Height <= 0 || videoStream.Width*videoStream.Height > maxVideoPixels {
-		return nil, fmt.Errorf("video resolution is unsupported")
+		return nil, fmt.Errorf("%w: video resolution is unsupported", ErrInvalidVideo)
 	}
 
 	return map[string]interface{}{

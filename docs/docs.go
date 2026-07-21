@@ -205,7 +205,7 @@ const docTemplate = `{
                         }
                     },
                     "503": {
-                        "description": "Upload capacity exhausted or server draining",
+                        "description": "Upload capacity exhausted, validation interrupted, or server draining",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
