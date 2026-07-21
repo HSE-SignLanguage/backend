@@ -6,19 +6,16 @@ import (
 	"streaming/mlclient"
 )
 
-func TestPredictionStabilizerRequiresTwoMatchingPredictions(t *testing.T) {
+func TestPredictionStabilizerEmitsFirstAcceptedPrediction(t *testing.T) {
 	var stabilizer predictionStabilizer
 	prediction := mlclient.Prediction{Text: "привет", Confidence: 0.91, Accepted: true}
 
-	if _, stable := stabilizer.Observe(prediction); stable {
-		t.Fatal("first prediction must remain provisional")
-	}
 	got, stable := stabilizer.Observe(prediction)
 	if !stable {
-		t.Fatal("second matching prediction must be emitted")
+		t.Fatal("an ML-accepted prediction must be emitted immediately")
 	}
 	if got.Text != prediction.Text || got.Confidence != prediction.Confidence {
-		t.Fatalf("unexpected stable prediction: %#v", got)
+		t.Fatalf("unexpected emitted prediction: %#v", got)
 	}
 	if _, stable := stabilizer.Observe(prediction); stable {
 		t.Fatal("an already emitted sign must not repeat")
@@ -29,15 +26,11 @@ func TestPredictionStabilizerRequiresTwoRejectedPredictionsToRelease(t *testing.
 	var stabilizer predictionStabilizer
 	prediction := mlclient.Prediction{Text: "дом", Accepted: true}
 
-	stabilizer.Observe(prediction)
-	if _, stable := stabilizer.Observe(prediction); !stable {
-		t.Fatal("expected initial sign to stabilize")
+	if _, emitted := stabilizer.Observe(prediction); !emitted {
+		t.Fatal("expected initial accepted sign to be emitted")
 	}
 	if _, stable := stabilizer.Observe(mlclient.Prediction{Text: "no", Accepted: false}); stable {
 		t.Fatal("rejected prediction must not be emitted")
-	}
-	if _, stable := stabilizer.Observe(prediction); stable {
-		t.Fatal("first prediction after a single rejection must remain provisional")
 	}
 	if _, stable := stabilizer.Observe(prediction); stable {
 		t.Fatal("a single rejected window must not release the emitted sign")
@@ -45,22 +38,40 @@ func TestPredictionStabilizerRequiresTwoRejectedPredictionsToRelease(t *testing.
 
 	stabilizer.Observe(mlclient.Prediction{Text: "no", Accepted: false})
 	stabilizer.Observe(mlclient.Prediction{Text: "no", Accepted: false})
-	if _, stable := stabilizer.Observe(prediction); stable {
-		t.Fatal("first prediction after release must remain provisional")
-	}
 	if _, stable := stabilizer.Observe(prediction); !stable {
 		t.Fatal("same sign must be allowed after two rejected separators")
 	}
 }
 
-func TestPredictionStabilizerResetsCandidateOnDifferentSign(t *testing.T) {
+func TestPredictionStabilizerConfirmsDifferentAcceptedSign(t *testing.T) {
 	var stabilizer predictionStabilizer
-	stabilizer.Observe(mlclient.Prediction{Text: "один", Accepted: true})
-	if _, stable := stabilizer.Observe(mlclient.Prediction{Text: "два", Accepted: true}); stable {
-		t.Fatal("a different sign must restart stabilization")
+	if _, emitted := stabilizer.Observe(mlclient.Prediction{Text: "один", Accepted: true}); !emitted {
+		t.Fatal("expected the first sign to be emitted")
 	}
-	if got, stable := stabilizer.Observe(mlclient.Prediction{Text: "два", Accepted: true}); !stable || got.Text != "два" {
-		t.Fatalf("expected the repeated replacement sign, got %#v stable=%v", got, stable)
+	if _, emitted := stabilizer.Observe(mlclient.Prediction{Text: "два", Accepted: true}); emitted {
+		t.Fatal("a different sign must remain provisional for one window")
+	}
+	if got, emitted := stabilizer.Observe(mlclient.Prediction{Text: "два", Accepted: true}); !emitted || got.Text != "два" {
+		t.Fatalf("expected a confirmed replacement sign, got %#v emitted=%v", got, emitted)
+	}
+}
+
+func TestPredictionStabilizerSuppressesAlternatingAcceptedJitter(t *testing.T) {
+	var stabilizer predictionStabilizer
+	if _, emitted := stabilizer.Observe(mlclient.Prediction{Text: "один", Accepted: true}); !emitted {
+		t.Fatal("expected the first sign to be emitted")
+	}
+
+	for _, text := range []string{"два", "один", "два", "один"} {
+		if _, emitted := stabilizer.Observe(mlclient.Prediction{Text: text, Accepted: true}); emitted {
+			t.Fatalf("alternating jitter %q must not be emitted", text)
+		}
+	}
+
+	stabilizer.Observe(mlclient.Prediction{Accepted: false, Reason: "low_confidence"})
+	stabilizer.Observe(mlclient.Prediction{Accepted: false, Reason: "low_confidence"})
+	if got, emitted := stabilizer.Observe(mlclient.Prediction{Text: "два", Accepted: true}); !emitted || got.Text != "два" {
+		t.Fatalf("a sign after a real pause must emit immediately, got %#v emitted=%v", got, emitted)
 	}
 }
 
@@ -68,11 +79,9 @@ func TestPredictionStabilizerTransportErrorDoesNotReleaseEmittedSign(t *testing.
 	var stabilizer predictionStabilizer
 	prediction := mlclient.Prediction{Text: "дом", Accepted: true}
 	stabilizer.Observe(prediction)
-	stabilizer.Observe(prediction)
 
 	stabilizer.OnError()
 	stabilizer.OnError()
-	stabilizer.Observe(prediction)
 	if _, stable := stabilizer.Observe(prediction); stable {
 		t.Fatal("transport errors must not allow a held sign to be emitted twice")
 	}

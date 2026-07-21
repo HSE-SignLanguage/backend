@@ -67,7 +67,7 @@ Realtime behavior:
 - 32-frame windows, stride 16;
 - one pending ML window: a newer window replaces stale queued work;
 - one global ML call at a time per backend process;
-- two matching accepted predictions required before a gesture is emitted;
+- the first ML-accepted gesture is emitted immediately;
 - the same gesture is suppressed until two rejected/`no` windows release it;
 - ML inference and ordered OpenRouter/WebSocket output use separate bounded queues.
 
@@ -290,7 +290,6 @@ The real OpenRouter integration test is opt-in by the presence of both `OPENROUT
 - Jobs and transcript state are in memory. A backend restart loses job status/results, and per-process limits are not shared across replicas.
 - `http.Server.Shutdown` does not drain upgraded WebSockets or detached upload workers; deployments interrupt active live sessions and jobs.
 - The global ML slot and single upload worker intentionally favor stability over throughput. Busy instances return `429`/`503`.
-- OpenRouter cleanup cannot repair an incorrectly recognized gesture and can intentionally return no delta when a safe addition is impossible.
-- Swagger describes internal root paths rather than the external `/api` prefix.
+- OpenRouter cleanup cannot repair an incorrectly recognized gesture; an empty model delta falls back to the accepted literal gesture.
 
 This repository does not currently include a license file; reuse terms are therefore not yet defined.
