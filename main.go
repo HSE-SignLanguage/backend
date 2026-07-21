@@ -37,6 +37,8 @@ func main() {
 	config := config.GetConfig()
 
 	docs.SwaggerInfo.Host = config.SwaggerHost
+	docs.SwaggerInfo.BasePath = config.SwaggerBasePath
+	docs.SwaggerInfo.Schemes = config.SwaggerSchemes
 
 	router := api.NewRouter(logger)
 	server := api.NewServer(config.Port, logger, router)
