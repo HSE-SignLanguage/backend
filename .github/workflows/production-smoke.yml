@@ -1,0 +1,30 @@
+name: Production smoke
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-smoke-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    uses: HSE-SignLanguage/ml/.github/workflows/production-smoke.yml@8ac03a9143433dbdcc31c82d2cf7222f133fac03
+    with:
+      target_url: https://hack.eferzo.xyz/api
+      mode: both
+      ml_ref: 8ac03a9143433dbdcc31c82d2cf7222f133fac03
+      settle_seconds: 120

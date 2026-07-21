@@ -1,4 +1,4 @@
-basePath: /
+basePath: /api
 definitions:
   api.JobStatus:
     enum:
@@ -83,7 +83,6 @@ definitions:
       type:
         type: string
     type: object
-host: localhost:8080
 info:
   contact:
     email: support@swagger.io
@@ -106,6 +105,10 @@ paths:
       responses:
         "200":
           description: OK
+          schema:
+            type: string
+        "503":
+          description: Server is draining
           schema:
             type: string
       summary: Health check endpoint
@@ -157,7 +160,7 @@ paths:
         Establishes a WebSocket connection for receiving video frames. Send binary frames to the server, and receive text responses back.
 
         **Client Flow:**
-        1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)
+        1. Connect to same-origin `/api/socket` using `wss:` on HTTPS pages and `ws:` otherwise
         2. Send video frames as binary messages (MessageBinary)
         3. Server buffers frames and sends batches of 32 to processing API
         4. Receive ordered gesture, formatting, and transcript events as JSON text messages
@@ -188,7 +191,9 @@ paths:
 
         **Frontend Example:**
         ```javascript
-        const ws = new WebSocket('ws://localhost:8080/socket');
+        const wsURL = new URL('/api/socket', window.location.origin);
+        wsURL.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(wsURL);
 
         // Send binary frame data
         ws.send(frameDataBlob);
@@ -208,6 +213,10 @@ paths:
             $ref: '#/definitions/api.WebSocketMessage'
         "400":
           description: Bad Request - Failed to accept websocket
+          schema:
+            type: string
+        "503":
+          description: WebSocket capacity exhausted or server draining
           schema:
             type: string
       summary: WebSocket endpoint for video frame streaming
@@ -241,7 +250,8 @@ paths:
         // 1. Upload video
         const formData = new FormData();
         formData.append('video', videoFile);
-        const uploadResp = await fetch('http://localhost:8080/upload', {
+        const apiBase = '/api';
+        const uploadResp = await fetch(`${apiBase}/upload`, {
         method: 'POST',
         body: formData
         });
@@ -249,7 +259,7 @@ paths:
 
         // 2. Poll for results
         const pollInterval = setInterval(async () => {
-        const statusResp = await fetch(`http://localhost:8080/job/${job_id}`);
+        const statusResp = await fetch(`${apiBase}/job/${job_id}`);
         const job = await statusResp.json();
 
         if (job.status === 'completed') {
@@ -311,7 +321,8 @@ paths:
               type: string
             type: object
         "503":
-          description: Upload capacity exhausted
+          description: Upload capacity exhausted, validation interrupted, or server
+            draining
           schema:
             additionalProperties:
               type: string
@@ -321,5 +332,7 @@ paths:
       - video
 schemes:
 - http
+- https
 - ws
+- wss
 swagger: "2.0"

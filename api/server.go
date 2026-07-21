@@ -12,14 +12,20 @@ import (
 )
 
 type Server struct {
-	Port   int
-	log    *logger.MultiLogger
-	Router *chi.Mux
-	serv   *http.Server
+	Port      int
+	log       *logger.MultiLogger
+	Router    *chi.Mux
+	serv      *http.Server
+	lifecycle shutdownLifecycle
 }
 
-func NewServer(port int, logger *logger.MultiLogger, router *chi.Mux) *Server {
-	return &Server{
+type shutdownLifecycle interface {
+	BeginShutdown()
+	Shutdown(context.Context) error
+}
+
+func NewServer(port int, logger *logger.MultiLogger, router *chi.Mux, lifecycles ...shutdownLifecycle) *Server {
+	server := &Server{
 		Port:   port,
 		log:    logger,
 		Router: router,
@@ -33,6 +39,10 @@ func NewServer(port int, logger *logger.MultiLogger, router *chi.Mux) *Server {
 			MaxHeaderBytes:    1 << 20,
 		},
 	}
+	if len(lifecycles) > 0 {
+		server.lifecycle = lifecycles[0]
+	}
+	return server
 }
 
 func (s *Server) Start() {
@@ -45,6 +55,36 @@ func (s *Server) Start() {
 
 func (s *Server) Stop(ctx context.Context) error {
 	s.log.Info("stopping server")
-	err := s.serv.Shutdown(ctx)
-	return err
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.lifecycle != nil {
+		s.lifecycle.BeginShutdown()
+	}
+
+	httpDone := make(chan error, 1)
+	go func() {
+		httpDone <- s.serv.Shutdown(ctx)
+	}()
+
+	workDone := make(chan error, 1)
+	if s.lifecycle == nil {
+		workDone <- nil
+	} else {
+		go func() {
+			workDone <- s.lifecycle.Shutdown(ctx)
+		}()
+	}
+
+	httpErr := <-httpDone
+	workErr := <-workDone
+	shutdownErr := errors.Join(httpErr, workErr)
+	if shutdownErr == nil {
+		return nil
+	}
+
+	// Shutdown leaves connections open when its context expires. Close regular
+	// HTTP connections explicitly; upgraded sockets are owned by the lifecycle.
+	closeErr := s.serv.Close()
+	return errors.Join(shutdownErr, closeErr)
 }

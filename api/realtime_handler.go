@@ -35,17 +35,20 @@ const (
 )
 
 type HandlersConfig struct {
-	log            *logger.MultiLogger
-	jobManager     *JobManager
-	useMock        bool
-	mlClient       *mlclient.Client
-	useOpenRouter  bool
-	jobSlots       chan struct{}
-	uploadSlots    chan struct{}
-	mlSlots        chan struct{}
-	webSocketSlots chan struct{}
-	webSocketMu    sync.Mutex
-	webSocketsByIP map[string]int
+	log             *logger.MultiLogger
+	jobManager      *JobManager
+	lifecycle       handlerLifecycle
+	useMock         bool
+	mlClient        *mlclient.Client
+	useOpenRouter   bool
+	jobSlots        chan struct{}
+	uploadSlots     chan struct{}
+	mlSlots         chan struct{}
+	webSocketSlots  chan struct{}
+	webSocketMu     sync.Mutex
+	webSocketsByIP  map[string]int
+	uploadTempDir   string
+	createExtractor func(context.Context, string) (*utils.VideoFrameExtractor, error)
 }
 
 func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
@@ -80,20 +83,21 @@ func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
 	}
 
 	jobManager := NewJobManager()
-	go jobManager.RunCleanup(context.Background(), time.Hour, 24*time.Hour)
-
-	return &HandlersConfig{
-		log:            log,
-		jobManager:     jobManager,
-		useMock:        useMock,
-		mlClient:       client,
-		useOpenRouter:  useOpenRouter,
-		jobSlots:       make(chan struct{}, maxConcurrentVideoJobs),
-		uploadSlots:    make(chan struct{}, maxConcurrentUploads),
-		mlSlots:        make(chan struct{}, maxConcurrentMLCalls),
-		webSocketSlots: make(chan struct{}, maxConcurrentSockets),
-		webSocketsByIP: make(map[string]int),
+	handlers := &HandlersConfig{
+		log:             log,
+		jobManager:      jobManager,
+		useMock:         useMock,
+		mlClient:        client,
+		useOpenRouter:   useOpenRouter,
+		jobSlots:        make(chan struct{}, maxConcurrentVideoJobs),
+		uploadSlots:     make(chan struct{}, maxConcurrentUploads),
+		mlSlots:         make(chan struct{}, maxConcurrentMLCalls),
+		webSocketSlots:  make(chan struct{}, maxConcurrentSockets),
+		webSocketsByIP:  make(map[string]int),
+		createExtractor: utils.NewVideoFrameExtractorContext,
 	}
+	go jobManager.RunCleanup(handlers.lifecycle.context(), time.Hour, 24*time.Hour)
+	return handlers
 }
 
 type WebSocketMessage struct {
@@ -120,8 +124,14 @@ type WebSocketMessage struct {
 // @Tags health
 // @Produce plain
 // @Success 200 {string} string "OK"
+// @Failure 503 {string} string "Server is draining"
 // @Router /health [get]
 func (hc *HandlersConfig) HealthCheck(w http.ResponseWriter, r *http.Request) {
+	if hc.lifecycle.isDraining() {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "SHUTTING_DOWN", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 }
@@ -131,7 +141,7 @@ func (hc *HandlersConfig) HealthCheck(w http.ResponseWriter, r *http.Request) {
 // @Description Establishes a WebSocket connection for receiving video frames. Send binary frames to the server, and receive text responses back.
 // @Description
 // @Description **Client Flow:**
-// @Description 1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)
+// @Description 1. Connect to same-origin `/api/socket` using `wss:` on HTTPS pages and `ws:` otherwise
 // @Description 2. Send video frames as binary messages (MessageBinary)
 // @Description 3. Server buffers frames and sends batches of 32 to processing API
 // @Description 4. Receive ordered gesture, formatting, and transcript events as JSON text messages
@@ -162,7 +172,9 @@ func (hc *HandlersConfig) HealthCheck(w http.ResponseWriter, r *http.Request) {
 // @Description
 // @Description **Frontend Example:**
 // @Description ```javascript
-// @Description const ws = new WebSocket('ws://localhost:8080/socket');
+// @Description const wsURL = new URL('/api/socket', window.location.origin);
+// @Description wsURL.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+// @Description const ws = new WebSocket(wsURL);
 // @Description
 // @Description // Send binary frame data
 // @Description ws.send(frameDataBlob);
@@ -178,8 +190,16 @@ func (hc *HandlersConfig) HealthCheck(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Success 101 {object} api.WebSocketMessage "Ordered two-layer transcript event"
 // @Failure 400 {string} string "Bad Request - Failed to accept websocket"
+// @Failure 503 {string} string "WebSocket capacity exhausted or server draining"
 // @Router /socket [get]
 func (hc *HandlersConfig) VideoSocketHandler(w http.ResponseWriter, r *http.Request) {
+	if !hc.lifecycle.tryBeginWork() {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer hc.lifecycle.endWork()
+
 	clientIP := requestClientIP(r)
 	if !hc.tryAcquireWebSocketSlot(clientIP) {
 		w.Header().Set("Retry-After", "5")
@@ -196,15 +216,29 @@ func (hc *HandlersConfig) VideoSocketHandler(w http.ResponseWriter, r *http.Requ
 
 	c.SetReadLimit(maxWebSocketFrameSize)
 
+	// The request context is not reliable after an HTTP connection is hijacked.
+	// A dedicated lifecycle context lets server shutdown cancel upgraded
+	// connections, which net/http cannot drain on its own.
+	ctx, cancel := context.WithCancel(hc.lifecycle.context())
+	stopSession := func() {
+		_ = c.Close(websocket.StatusGoingAway, "server shutting down")
+		cancel()
+	}
+	sessionID := hc.lifecycle.registerWebSocket(stopSession)
 	hc.log.Info("Client connected to video socket")
 	defer func() {
-		c.Close(websocket.StatusNormalClosure, "closing connection")
+		hc.lifecycle.unregisterWebSocket(sessionID)
+		cancel()
+		status := websocket.StatusNormalClosure
+		reason := "closing connection"
+		if hc.lifecycle.isDraining() {
+			status = websocket.StatusGoingAway
+			reason = "server shutting down"
+		}
+		_ = c.Close(status, reason)
 		hc.log.Info("Client disconnected from video socket")
 	}()
 
-	// The request context is not reliable after an HTTP connection is hijacked.
-	// The session is instead cancelled when the WebSocket read loop exits.
-	ctx, cancel := context.WithCancel(context.Background())
 	batchQueue := make(chan [][]byte, frameBatchQueueSize)
 	workerDone := make(chan struct{})
 
@@ -269,6 +303,10 @@ func (hc *HandlersConfig) handleFrameStream(ctx context.Context, c *websocket.Co
 		typ, data, err := c.Read(readCtx)
 		cancelRead()
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				hc.log.Debug("websocket session cancelled")
+				return
+			}
 			if errors.Is(err, context.DeadlineExceeded) {
 				hc.log.Info("closing idle websocket")
 				_ = c.Close(websocket.StatusPolicyViolation, "idle timeout")
@@ -455,7 +493,7 @@ func (hc *HandlersConfig) updateTranscriptWithContext(ctx context.Context, fullT
 	if err != nil {
 		return "", "", err
 	}
-	updatedTranscript, delta := appendTranscriptDelta(fullTranscript, chunk, update.Delta)
+	updatedTranscript, delta := appendTranscriptDelta(fullTranscript, update.Delta)
 	return updatedTranscript, delta, nil
 }
 
