@@ -328,6 +328,9 @@ func WindowFrames(frames [][]byte, windowSize, stride int) [][][]byte {
 			break
 		}
 		windows = append(windows, window)
+		if end == len(frames) {
+			break
+		}
 	}
 	return windows
 }

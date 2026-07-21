@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -149,8 +150,18 @@ func (c *Client) processFramesOnce(ctx context.Context, bodyBytes []byte) (Predi
 	if err := json.Unmarshal(responseBody, &parsed); err != nil {
 		return Prediction{}, 0, false, fmt.Errorf("decode ml response: %w", err)
 	}
+	if math.IsNaN(parsed.Confidence) || math.IsInf(parsed.Confidence, 0) || parsed.Confidence < 0 || parsed.Confidence > 1 {
+		return Prediction{}, 0, false, errors.New("ml response contains invalid confidence")
+	}
 
 	text := strings.TrimSpace(parsed.Text)
+	if text != "" {
+		var normalizeErr error
+		text, normalizeErr = utils.NormalizeTranscriptTokenText(text)
+		if normalizeErr != nil {
+			return Prediction{}, 0, false, fmt.Errorf("validate ml response text: %w", normalizeErr)
+		}
+	}
 	accepted := text != ""
 	if parsed.Accepted != nil {
 		accepted = *parsed.Accepted

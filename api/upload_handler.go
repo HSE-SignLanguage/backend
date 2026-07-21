@@ -360,7 +360,15 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, requeste
 				})
 				continue
 			}
-			literalText := strings.TrimSpace(stablePrediction.Text)
+			literalText, err := utils.NormalizeTranscriptTokenText(stablePrediction.Text)
+			if err != nil {
+				hc.log.Warn("discarded invalid ML transcript token", "job_id", jobID, "batch_num", i+1, "error", err)
+				hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
+					job.FailedBatches++
+					job.ProcessedBatches++
+				})
+				continue
+			}
 
 			updatedTranscript, newSegment, err := hc.updateTranscriptWithContext(ctx, transcriptContext, literalText)
 			if err != nil {
@@ -388,12 +396,10 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, requeste
 			hc.jobManager.AddTranscriptionResult(jobID, newSegment)
 		}
 
-		select {
-		case <-ctx.Done():
-			hc.jobManager.FailJob(jobID, "video processing timed out")
-			return
-		case <-time.After(100 * time.Millisecond):
-		}
+	}
+	if err := ctx.Err(); err != nil {
+		hc.jobManager.FailJob(jobID, "video processing timed out")
+		return
 	}
 
 	if successfulInferences == 0 && len(batches) > 0 {

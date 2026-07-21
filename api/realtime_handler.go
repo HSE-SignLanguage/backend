@@ -97,10 +97,21 @@ func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
 }
 
 type WebSocketMessage struct {
-	Type       string  `json:"type"`
-	Text       string  `json:"text"`
-	FullText   string  `json:"full_text"`
-	Confidence float64 `json:"confidence"`
+	Type          string  `json:"type"`
+	Text          string  `json:"text"`
+	FullText      string  `json:"full_text"`
+	LiteralText   string  `json:"literal_text"`
+	FinalText     string  `json:"final_text"`
+	DraftText     string  `json:"draft_text"`
+	Confidence    float64 `json:"confidence"`
+	Status        string  `json:"status,omitempty"`
+	Enhanced      *bool   `json:"enhanced,omitempty"`
+	Sequence      uint64  `json:"sequence,omitempty"`
+	SegmentID     uint64  `json:"segment_id,omitempty"`
+	FirstSequence uint64  `json:"first_sequence,omitempty"`
+	LastSequence  uint64  `json:"last_sequence,omitempty"`
+	TokenCount    int     `json:"token_count,omitempty"`
+	Truncated     bool    `json:"truncated,omitempty"`
 }
 
 // HealthCheck godoc
@@ -123,18 +134,31 @@ func (hc *HandlersConfig) HealthCheck(w http.ResponseWriter, r *http.Request) {
 // @Description 1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)
 // @Description 2. Send video frames as binary messages (MessageBinary)
 // @Description 3. Server buffers frames and sends batches of 32 to processing API
-// @Description 4. Receive text responses as JSON messages (MessageText)
+// @Description 4. Receive ordered gesture, formatting, and transcript events as JSON text messages
 // @Description
-// @Description **Response Format:**
-// @Description The server sends back JSON text messages with the structure:
+// @Description **Two-layer transcript:**
+// @Description Every stable gesture is emitted immediately as type=gesture with status=draft. Stable gestures are grouped after 3 seconds of idle time or 6 tokens. A type=formatting event marks a segment being processed. The final type=transcript event replaces that segment's raw draft with enhanced or literal text. OpenRouter never blocks newer gesture events.
+// @Description
+// @Description **Gesture event:**
 // @Description ```json
 // @Description {
-// @Description   "type": "transcript",
-// @Description   "text": "append-only delta",
-// @Description   "full_text": "authoritative transcript snapshot",
+// @Description   "type": "gesture", "status": "draft", "text": "работать",
+// @Description   "final_text": "", "draft_text": "я работать", "full_text": "я работать", "literal_text": "я работать",
+// @Description   "confidence": 0.91, "sequence": 2, "segment_id": 1
+// @Description }
+// @Description ```
+// @Description
+// @Description **Final segment event:**
+// @Description ```json
+// @Description {
+// @Description   "type": "transcript", "status": "enhanced", "enhanced": true,
+// @Description   "text": "Я работаю.", "final_text": "Я работаю.", "draft_text": "",
+// @Description   "full_text": "Я работаю.", "literal_text": "я работать", "sequence": 2, "segment_id": 1,
+// @Description   "first_sequence": 1, "last_sequence": 2, "token_count": 2,
 // @Description   "confidence": 0.91
 // @Description }
 // @Description ```
+// @Description full_text is the authoritative rendered snapshot and equals finalized presentation text followed by all raw draft tokens. literal_text independently preserves recognizer-only output. text and confidence remain for compatibility. Sequences and segment IDs are monotonic per connection. truncated=true means the bounded session discarded its oldest finalized prefix.
 // @Description
 // @Description **Frontend Example:**
 // @Description ```javascript
@@ -152,7 +176,7 @@ func (hc *HandlersConfig) HealthCheck(w http.ResponseWriter, r *http.Request) {
 // @Tags websocket
 // @Accept octet-stream
 // @Produce json
-// @Success 101 {object} api.WebSocketMessage "WebSocket response with extracted text"
+// @Success 101 {object} api.WebSocketMessage "Ordered two-layer transcript event"
 // @Failure 400 {string} string "Bad Request - Failed to accept websocket"
 // @Router /socket [get]
 func (hc *HandlersConfig) VideoSocketHandler(w http.ResponseWriter, r *http.Request) {
@@ -369,46 +393,44 @@ func (hc *HandlersConfig) processFrameBatches(ctx context.Context, c *websocket.
 	}
 }
 
-// processStablePredictions keeps slow OpenRouter requests and WebSocket writes
-// out of the ML inference loop. Stable literals are processed in order through
-// a small bounded queue while the frame queue continues to discard stale video.
+// processStablePredictions owns the sole WebSocket writer for transcript
+// events. OpenRouter runs asynchronously and never blocks raw gesture updates.
 func (hc *HandlersConfig) processStablePredictions(ctx context.Context, c *websocket.Conn, literalQueue <-chan mlclient.Prediction) {
-	fullTranscript := ""
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case stablePrediction, ok := <-literalQueue:
-			if !ok {
-				return
-			}
-
-			updatedTranscript, delta, err := hc.updateTranscriptWithContext(ctx, fullTranscript, stablePrediction.Text)
-			if err != nil {
-				hc.log.Warn("failed to improve transcript, using literal text", "error", err)
-				delta = strings.TrimSpace(stablePrediction.Text)
-				updatedTranscript = combineTranscript(fullTranscript, delta)
-			}
-			if delta == "" {
-				continue
-			}
-
-			fullTranscript = updatedTranscript
-			response := WebSocketMessage{
-				Type:       "transcript",
-				Text:       delta,
-				FullText:   fullTranscript,
-				Confidence: stablePrediction.Confidence,
-			}
-			if err := hc.sendTextToClient(ctx, c, response); err != nil {
-				hc.log.Warn("failed to send text to websocket client", "error", err)
-				_ = c.Close(websocket.StatusInternalError, "failed to send transcript")
-				return
-			}
-
-			hc.log.Info("sent stable transcript segment", "segment_length", len(delta), "confidence", stablePrediction.Confidence)
+	formatter := func(formatCtx context.Context, priorContext string, tokens []utils.TranscriptSegmentToken) (string, bool, error) {
+		if hc.useMock || !hc.useOpenRouter {
+			return utils.LiteralSegmentText(tokens), false, nil
 		}
+		started := time.Now()
+		segment, err := utils.FormatTranscriptSegment(formatCtx, priorContext, tokens)
+		firstSequence := tokens[0].Sequence
+		lastSequence := tokens[len(tokens)-1].Sequence
+		hc.log.Debug(
+			"OpenRouter segment formatting completed",
+			"duration_ms", time.Since(started).Milliseconds(),
+			"token_count", len(tokens),
+			"first_sequence", firstSequence,
+			"last_sequence", lastSequence,
+			"success", err == nil,
+		)
+		if err != nil {
+			return "", false, err
+		}
+		return segment.SegmentText, true, nil
+	}
+
+	sender := func(sendCtx context.Context, message WebSocketMessage) error {
+		return hc.sendTextToClient(sendCtx, c, message)
+	}
+	assembler := newLiveTranscriptAssembler(
+		liveSegmentIdleTimeout,
+		utils.MaxTranscriptSegmentTokens,
+		formatter,
+		sender,
+		hc.log,
+	)
+	if err := assembler.Run(ctx, literalQueue); err != nil && !errors.Is(err, context.Canceled) {
+		hc.log.Warn("live transcript session stopped", "error", err)
+		_ = c.Close(websocket.StatusInternalError, "failed to send transcript")
 	}
 }
 
@@ -471,7 +493,14 @@ func (hc *HandlersConfig) requestPrediction(ctx context.Context, frames [][]byte
 	}
 	defer hc.releaseMLSlot()
 
+	started := time.Now()
 	prediction, err := hc.mlClient.ProcessFrames(ctx, frames)
+	hc.log.Debug(
+		"ML frame processing completed",
+		"duration_ms", time.Since(started).Milliseconds(),
+		"frame_count", len(frames),
+		"success", err == nil,
+	)
 	if err != nil {
 		return mlclient.Prediction{}, fmt.Errorf("call ml api: %w", err)
 	}

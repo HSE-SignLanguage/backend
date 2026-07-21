@@ -84,7 +84,7 @@ const docTemplate = `{
         },
         "/socket": {
             "get": {
-                "description": "Establishes a WebSocket connection for receiving video frames. Send binary frames to the server, and receive text responses back.\n\n**Client Flow:**\n1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)\n2. Send video frames as binary messages (MessageBinary)\n3. Server buffers frames and sends batches of 32 to processing API\n4. Receive text responses as JSON messages (MessageText)\n\n**Response Format:**\nThe server sends back JSON text messages with the structure:\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"type\": \"transcript\",\n\"text\": \"append-only delta\",\n\"full_text\": \"authoritative transcript snapshot\",\n\"confidence\": 0.91\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\nconst ws = new WebSocket('ws://localhost:8080/socket');\n\n// Send binary frame data\nws.send(frameDataBlob);\n\n// Receive text messages\nws.onmessage = (event) =\u003e {\nconst data = JSON.parse(event.data);\nconsole.log('Received text:', data.text);\n};\n` + "`" + `` + "`" + `` + "`" + `",
+                "description": "Establishes a WebSocket connection for receiving video frames. Send binary frames to the server, and receive text responses back.\n\n**Client Flow:**\n1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)\n2. Send video frames as binary messages (MessageBinary)\n3. Server buffers frames and sends batches of 32 to processing API\n4. Receive ordered gesture, formatting, and transcript events as JSON text messages\n\n**Two-layer transcript:**\nEvery stable gesture is emitted immediately as type=gesture with status=draft. Stable gestures are grouped after 3 seconds of idle time or 6 tokens. A type=formatting event marks a segment being processed. The final type=transcript event replaces that segment's raw draft with enhanced or literal text. OpenRouter never blocks newer gesture events.\n\n**Gesture event:**\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"type\": \"gesture\", \"status\": \"draft\", \"text\": \"работать\",\n\"final_text\": \"\", \"draft_text\": \"я работать\", \"full_text\": \"я работать\", \"literal_text\": \"я работать\",\n\"confidence\": 0.91, \"sequence\": 2, \"segment_id\": 1\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Final segment event:**\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"type\": \"transcript\", \"status\": \"enhanced\", \"enhanced\": true,\n\"text\": \"Я работаю.\", \"final_text\": \"Я работаю.\", \"draft_text\": \"\",\n\"full_text\": \"Я работаю.\", \"literal_text\": \"я работать\", \"sequence\": 2, \"segment_id\": 1,\n\"first_sequence\": 1, \"last_sequence\": 2, \"token_count\": 2,\n\"confidence\": 0.91\n}\n` + "`" + `` + "`" + `` + "`" + `\nfull_text is the authoritative rendered snapshot and equals finalized presentation text followed by all raw draft tokens. literal_text independently preserves recognizer-only output. text and confidence remain for compatibility. Sequences and segment IDs are monotonic per connection. truncated=true means the bounded session discarded its oldest finalized prefix.\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\nconst ws = new WebSocket('ws://localhost:8080/socket');\n\n// Send binary frame data\nws.send(frameDataBlob);\n\n// Receive text messages\nws.onmessage = (event) =\u003e {\nconst data = JSON.parse(event.data);\nconsole.log('Received text:', data.text);\n};\n` + "`" + `` + "`" + `` + "`" + `",
                 "consumes": [
                     "application/octet-stream"
                 ],
@@ -97,7 +97,7 @@ const docTemplate = `{
                 "summary": "WebSocket endpoint for video frame streaming",
                 "responses": {
                     "101": {
-                        "description": "WebSocket response with extracted text",
+                        "description": "Ordered two-layer transcript event",
                         "schema": {
                             "$ref": "#/definitions/api.WebSocketMessage"
                         }
@@ -283,11 +283,44 @@ const docTemplate = `{
                 "confidence": {
                     "type": "number"
                 },
+                "draft_text": {
+                    "type": "string"
+                },
+                "enhanced": {
+                    "type": "boolean"
+                },
+                "final_text": {
+                    "type": "string"
+                },
+                "first_sequence": {
+                    "type": "integer"
+                },
                 "full_text": {
+                    "type": "string"
+                },
+                "last_sequence": {
+                    "type": "integer"
+                },
+                "literal_text": {
+                    "type": "string"
+                },
+                "segment_id": {
+                    "type": "integer"
+                },
+                "sequence": {
+                    "type": "integer"
+                },
+                "status": {
                     "type": "string"
                 },
                 "text": {
                     "type": "string"
+                },
+                "token_count": {
+                    "type": "integer"
+                },
+                "truncated": {
+                    "type": "boolean"
                 },
                 "type": {
                     "type": "string"

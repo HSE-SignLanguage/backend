@@ -54,10 +54,32 @@ definitions:
     properties:
       confidence:
         type: number
+      draft_text:
+        type: string
+      enhanced:
+        type: boolean
+      final_text:
+        type: string
+      first_sequence:
+        type: integer
       full_text:
+        type: string
+      last_sequence:
+        type: integer
+      literal_text:
+        type: string
+      segment_id:
+        type: integer
+      sequence:
+        type: integer
+      status:
         type: string
       text:
         type: string
+      token_count:
+        type: integer
+      truncated:
+        type: boolean
       type:
         type: string
     type: object
@@ -138,18 +160,31 @@ paths:
         1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)
         2. Send video frames as binary messages (MessageBinary)
         3. Server buffers frames and sends batches of 32 to processing API
-        4. Receive text responses as JSON messages (MessageText)
+        4. Receive ordered gesture, formatting, and transcript events as JSON text messages
 
-        **Response Format:**
-        The server sends back JSON text messages with the structure:
+        **Two-layer transcript:**
+        Every stable gesture is emitted immediately as type=gesture with status=draft. Stable gestures are grouped after 3 seconds of idle time or 6 tokens. A type=formatting event marks a segment being processed. The final type=transcript event replaces that segment's raw draft with enhanced or literal text. OpenRouter never blocks newer gesture events.
+
+        **Gesture event:**
         ```json
         {
-        "type": "transcript",
-        "text": "append-only delta",
-        "full_text": "authoritative transcript snapshot",
+        "type": "gesture", "status": "draft", "text": "работать",
+        "final_text": "", "draft_text": "я работать", "full_text": "я работать", "literal_text": "я работать",
+        "confidence": 0.91, "sequence": 2, "segment_id": 1
+        }
+        ```
+
+        **Final segment event:**
+        ```json
+        {
+        "type": "transcript", "status": "enhanced", "enhanced": true,
+        "text": "Я работаю.", "final_text": "Я работаю.", "draft_text": "",
+        "full_text": "Я работаю.", "literal_text": "я работать", "sequence": 2, "segment_id": 1,
+        "first_sequence": 1, "last_sequence": 2, "token_count": 2,
         "confidence": 0.91
         }
         ```
+        full_text is the authoritative rendered snapshot and equals finalized presentation text followed by all raw draft tokens. literal_text independently preserves recognizer-only output. text and confidence remain for compatibility. Sequences and segment IDs are monotonic per connection. truncated=true means the bounded session discarded its oldest finalized prefix.
 
         **Frontend Example:**
         ```javascript
@@ -168,7 +203,7 @@ paths:
       - application/json
       responses:
         "101":
-          description: WebSocket response with extracted text
+          description: Ordered two-layer transcript event
           schema:
             $ref: '#/definitions/api.WebSocketMessage'
         "400":

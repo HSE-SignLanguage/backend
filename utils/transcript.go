@@ -63,16 +63,23 @@ type responseFormat struct {
 }
 
 type providerPreferences struct {
-	RequireParameters bool `json:"require_parameters"`
+	RequireParameters bool   `json:"require_parameters"`
+	Sort              string `json:"sort,omitempty"`
+	AllowFallbacks    bool   `json:"allow_fallbacks,omitempty"`
+}
+
+type reasoningPreferences struct {
+	Effort string `json:"effort"`
 }
 
 type chatRequest struct {
-	Model          string              `json:"model"`
-	Messages       []chatMessage       `json:"messages"`
-	Temperature    float64             `json:"temperature"`
-	MaxTokens      int                 `json:"max_tokens"`
-	ResponseFormat responseFormat      `json:"response_format"`
-	Provider       providerPreferences `json:"provider"`
+	Model          string                `json:"model"`
+	Messages       []chatMessage         `json:"messages"`
+	Temperature    float64               `json:"temperature"`
+	MaxTokens      int                   `json:"max_tokens"`
+	ResponseFormat responseFormat        `json:"response_format"`
+	Provider       providerPreferences   `json:"provider"`
+	Reasoning      *reasoningPreferences `json:"reasoning,omitempty"`
 }
 
 type chatChoice struct {
@@ -163,60 +170,13 @@ func UpdateTranscript(ctx context.Context, currentContext, newLiteral string) (T
 		},
 	}
 
-	bodyBytes, err := json.Marshal(reqBody)
+	choice, err := requestOpenRouter(ctx, apiKey, reqBody)
 	if err != nil {
-		return TranscriptUpdate{}, fmt.Errorf("encode request: %w", err)
-	}
-	if len(bodyBytes) > maxRequestBodyLen {
-		return TranscriptUpdate{}, errors.New("openrouter request is too large")
-	}
-
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	requestCtx, cancel := context.WithTimeout(ctx, openRouterTimeout)
-	defer cancel()
-
-	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, openRouterURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return TranscriptUpdate{}, fmt.Errorf("build request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
-
-	resp, err := openRouterHTTPClient.Do(httpReq)
-	if err != nil {
-		return TranscriptUpdate{}, fmt.Errorf("call openrouter: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return TranscriptUpdate{}, fmt.Errorf("openrouter returned status %d", resp.StatusCode)
-	}
-
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyLen+1))
-	if err != nil {
-		return TranscriptUpdate{}, fmt.Errorf("read openrouter response: %w", err)
-	}
-	if len(responseBody) > maxResponseBodyLen {
-		return TranscriptUpdate{}, errors.New("openrouter response is too large")
-	}
-
-	var parsed chatResponse
-	if err := json.Unmarshal(responseBody, &parsed); err != nil {
-		return TranscriptUpdate{}, fmt.Errorf("decode response: %w", err)
-	}
-	if len(parsed.Choices) == 0 {
-		return TranscriptUpdate{}, errors.New("openrouter response missing choices")
-	}
-	if parsed.Choices[0].FinishReason == "length" {
-		return TranscriptUpdate{}, errors.New("openrouter response was truncated")
+		return TranscriptUpdate{}, err
 	}
 
 	var update TranscriptUpdate
-	updateDecoder := json.NewDecoder(strings.NewReader(parsed.Choices[0].Message.Content))
+	updateDecoder := json.NewDecoder(strings.NewReader(choice.Message.Content))
 	updateDecoder.DisallowUnknownFields()
 	if err := updateDecoder.Decode(&update); err != nil {
 		return TranscriptUpdate{}, fmt.Errorf("decode transcript update: %w", err)
@@ -240,6 +200,61 @@ func UpdateTranscript(ctx context.Context, currentContext, newLiteral string) (T
 	}
 
 	return update, nil
+}
+
+func requestOpenRouter(ctx context.Context, apiKey string, reqBody chatRequest) (chatChoice, error) {
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return chatChoice{}, fmt.Errorf("encode request: %w", err)
+	}
+	if len(bodyBytes) > maxRequestBodyLen {
+		return chatChoice{}, errors.New("openrouter request is too large")
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, openRouterTimeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, openRouterURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return chatChoice{}, fmt.Errorf("build request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+
+	resp, err := openRouterHTTPClient.Do(httpReq)
+	if err != nil {
+		return chatChoice{}, fmt.Errorf("call openrouter: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return chatChoice{}, fmt.Errorf("openrouter returned status %d", resp.StatusCode)
+	}
+
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyLen+1))
+	if err != nil {
+		return chatChoice{}, fmt.Errorf("read openrouter response: %w", err)
+	}
+	if len(responseBody) > maxResponseBodyLen {
+		return chatChoice{}, errors.New("openrouter response is too large")
+	}
+
+	var parsed chatResponse
+	if err := json.Unmarshal(responseBody, &parsed); err != nil {
+		return chatChoice{}, fmt.Errorf("decode response: %w", err)
+	}
+	if len(parsed.Choices) == 0 {
+		return chatChoice{}, errors.New("openrouter response missing choices")
+	}
+	if parsed.Choices[0].FinishReason == "length" {
+		return chatChoice{}, errors.New("openrouter response was truncated")
+	}
+	return parsed.Choices[0], nil
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
