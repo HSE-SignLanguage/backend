@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/joho/godotenv"
 	"streaming/utils"
@@ -161,4 +163,31 @@ func TestUpdateTranscriptIntegrationOpenRouter(t *testing.T) {
 	}
 
 	fmt.Printf("updated transcript: %q\n", result.FullText)
+}
+
+func TestFormatTranscriptSegmentIntegrationOpenRouter(t *testing.T) {
+	_ = godotenv.Load("../.env")
+
+	if _, ok := os.LookupEnv("OPENROUTER_API_KEY"); !ok {
+		t.Skip("OPENROUTER_API_KEY not set; skipping integration test")
+	}
+	if _, ok := os.LookupEnv("OPENROUTER_MODEL"); !ok {
+		t.Skip("OPENROUTER_MODEL not set; skipping integration test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := utils.FormatTranscriptSegment(ctx, "", []utils.TranscriptSegmentToken{
+		{Text: "я", Confidence: 0.93, Sequence: 1},
+		{Text: "работать", Confidence: 0.88, Sequence: 2},
+	})
+	if err != nil {
+		t.Fatalf("OpenRouter segment request failed: %v", err)
+	}
+	if strings.TrimSpace(result.SegmentText) == "" || result.FirstSequence != 1 || result.LastSequence != 2 {
+		t.Fatalf("unexpected formatted segment: %#v", result)
+	}
+	if len(result.SourceSequences) != 2 || result.SourceSequences[0] != 1 || result.SourceSequences[1] != 2 {
+		t.Fatalf("unexpected source sequence mapping: %#v", result.SourceSequences)
+	}
 }

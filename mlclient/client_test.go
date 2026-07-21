@@ -121,3 +121,41 @@ func TestProcessFramesRejectsOversizedResponse(t *testing.T) {
 		t.Fatal("expected oversized response error")
 	}
 }
+
+func TestProcessFramesRejectsInvalidConfidence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"text":       "дом",
+			"confidence": 1.5,
+			"accepted":   true,
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	if _, err := client.ProcessFrames(context.Background(), [][]byte{[]byte("frame")}); err == nil || !strings.Contains(err.Error(), "confidence") {
+		t.Fatalf("expected invalid confidence error, got %v", err)
+	}
+}
+
+func TestProcessFramesRejectsOversizedTranscriptToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"text":       strings.Repeat("я", 129),
+			"confidence": 0.9,
+			"accepted":   true,
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	if _, err := client.ProcessFrames(context.Background(), [][]byte{[]byte("frame")}); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("expected oversized token error, got %v", err)
+	}
+}

@@ -48,6 +48,38 @@ func TestWindowFramesUsesOverlapAndPadsTail(t *testing.T) {
 	}
 }
 
+func TestWindowFramesDoesNotAddTailAfterExactFinalWindow(t *testing.T) {
+	tests := []struct {
+		name        string
+		frameCount  int
+		windowCount int
+	}{
+		{name: "one exact window", frameCount: 32, windowCount: 1},
+		{name: "two exact overlapping windows", frameCount: 48, windowCount: 2},
+		{name: "one exact and one padded window", frameCount: 40, windowCount: 2},
+		{name: "maximum exact upload boundary", frameCount: 960, windowCount: 59},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frames := make([][]byte, tt.frameCount)
+			for index := range frames {
+				frames[index] = []byte{byte(index)}
+			}
+
+			windows := WindowFrames(frames, 32, 16)
+			if len(windows) != tt.windowCount {
+				t.Fatalf("expected %d windows for %d frames, got %d", tt.windowCount, tt.frameCount, len(windows))
+			}
+			for index, window := range windows {
+				if len(window) != 32 {
+					t.Fatalf("window %d has %d frames", index, len(window))
+				}
+			}
+		})
+	}
+}
+
 func TestExtractionRejectsUnboundedFrameCountBeforeFfmpeg(t *testing.T) {
 	extractor := &VideoFrameExtractor{duration: 60, frameRate: 30}
 	if _, err := extractor.ExtractFramesWithInterval(1); err == nil {

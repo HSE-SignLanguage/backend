@@ -2,7 +2,7 @@
 
 **Go orchestration service for live and uploaded-video Russian Sign Language recognition.**
 
-It accepts browser frames over WebSocket or a video over HTTP, builds fixed ML windows, stabilizes predictions, optionally applies conservative transcript cleanup through OpenRouter, and returns an append-only transcript.
+It accepts browser frames over WebSocket or a video over HTTP, builds fixed ML windows, stabilizes predictions, and exposes a two-layer live transcript: literal gestures immediately, then conservative phrase cleanup through OpenRouter.
 
 **🇬🇧 English** · [🇷🇺 Русский](README.ru.md)
 
@@ -31,7 +31,7 @@ The backend owns transport, load control and transcript state. The [ML service](
 
 Two request paths share the same ML contract:
 
-- **Realtime:** overlapping 32-frame windows with a 16-frame stride, latest-work replacement, two-window gesture confirmation and WebSocket transcript messages.
+- **Realtime:** overlapping 32-frame windows with a 16-frame stride, latest-work replacement, two-window gesture confirmation, immediate raw gesture events, and ordered asynchronous phrase formatting.
 - **Upload:** synchronous upload/`ffprobe` validation, bounded FFmpeg extraction, asynchronous inference, and polling through a UUID job ID.
 
 ## URL contract
@@ -67,9 +67,11 @@ Realtime behavior:
 - 32-frame windows, stride 16;
 - one pending ML window: a newer window replaces stale queued work;
 - one global ML call at a time per backend process;
-- the first ML-accepted gesture is emitted immediately;
+- every stable ML-accepted gesture is emitted immediately as a raw draft;
 - the same gesture is suppressed until two rejected/`no` windows release it;
-- ML inference and ordered OpenRouter/WebSocket output use separate bounded queues.
+- draft gestures are grouped after about three idle seconds or six tokens;
+- at most one OpenRouter formatter runs per connection while newer gestures remain visible as pending draft;
+- one event loop owns ordered WebSocket output, so formatted segments cannot overtake one another.
 
 Connection limits per backend process:
 
@@ -82,18 +84,48 @@ Connection limits per backend process:
 | Idle timeout | 45 seconds |
 | Non-binary violations | closed after 3 |
 
-The server sends text messages with this shape:
+The server sends three ordered event types. A stable gesture appears first, without waiting for OpenRouter:
+
+```json
+{
+  "type": "gesture",
+  "status": "draft",
+  "text": "работать",
+  "final_text": "",
+  "draft_text": "я работать",
+  "full_text": "я работать",
+  "literal_text": "я работать",
+  "confidence": 0.91,
+  "sequence": 2,
+  "segment_id": 1,
+  "first_sequence": 2,
+  "last_sequence": 2,
+  "token_count": 1
+}
+```
+
+When an idle/max-size boundary closes the segment, `type: "formatting"` announces the same snapshots and segment range. Completion produces either an enhanced segment or a deterministic literal fallback:
 
 ```json
 {
   "type": "transcript",
-  "text": "new append-only segment",
-  "full_text": "authoritative transcript snapshot",
-  "confidence": 0.91
+  "status": "enhanced",
+  "enhanced": true,
+  "text": "Я работаю.",
+  "final_text": "Я работаю.",
+  "draft_text": "дом",
+  "full_text": "Я работаю. дом",
+  "literal_text": "я работать дом",
+  "confidence": 0.87,
+  "sequence": 2,
+  "segment_id": 1,
+  "first_sequence": 1,
+  "last_sequence": 2,
+  "token_count": 2
 }
 ```
 
-`text` is a compatibility delta. Clients should prefer `full_text` as the authoritative current transcript instead of appending messages blindly.
+`full_text` is the authoritative rendered snapshot and always contains finalized presentation text plus every raw in-flight/pending gesture. `literal_text` independently preserves the recognizer-only stream, so an AI rewrite never replaces the source evidence. `final_text` contains completed ordered presentation segments; `draft_text` contains raw tokens still eligible for replacement. `text` and `confidence` keep their legacy shape, but clients must not blindly append `text` from every event; they should replace their visible state from `full_text`. On an OpenRouter error the final event has `status: "literal"`, `enhanced: false`, and commits the exact raw tokens, so already visible text never disappears. Long-lived sessions are bounded; `truncated: true` means the oldest finalized prefix was removed from both snapshots.
 
 ### `POST /upload`
 
@@ -170,9 +202,9 @@ For compatibility with the original ML API, a response containing only non-empty
 
 ## Optional OpenRouter cleanup
 
-Recognition remains an ML decision. OpenRouter receives only the accepted literal gesture and up to the last 1000 Unicode characters of transcript context—never frames or the uploaded video.
+Recognition remains an ML decision. For live sessions, OpenRouter receives an immutable ordered group of at most six accepted literals (with backend-assigned sequence and confidence) plus up to the last 1000 Unicode characters of finalized context—never frames or the uploaded video.
 
-When enabled, cleanup is conservative: temperature zero, strict JSON Schema, append-only validation, bounded request/response sizes, and a five-second timeout. A response may add only a new `delta`; it cannot rewrite the existing transcript. Invalid, truncated, oversized or unavailable output falls back to the literal gesture. The configured model/provider must support every requested structured-output parameter.
+Formatting is asynchronous and conservative: temperature zero, minimal reasoning effort, strict JSON Schema, echoed sequence validation, bounded request/response sizes, and a five-second timeout. Provider routing requires requested parameters, prefers latency, and allows failover. A response may return only the new segment; it cannot rewrite finalized context. Invalid, truncated, oversized, delayed/mismatched or unavailable output falls back to the exact literal segment. Uploaded-video jobs retain the legacy append-only per-literal cleanup contract.
 
 Set `USE_OPENROUTER=false` to keep all transcript processing local to the backend and ML service.
 
@@ -257,7 +289,7 @@ go vet ./...
 go build ./...
 ```
 
-The GitHub Actions workflow runs on pushes to `main` and pull requests with a 15-minute job timeout. Tests cover transcript validation, ML response/retry behavior, prediction stabilization, trusted-proxy resolution, video-job capacity, and frame windowing.
+The GitHub Actions workflow runs on pushes to `main` and pull requests with a 15-minute job timeout. Tests cover strict segment formatting, two-layer live ordering/snapshots/fallback, ML response/retry behavior, prediction stabilization, trusted-proxy resolution, video-job capacity, and exact/padded frame windowing.
 
 The real OpenRouter integration test is opt-in by the presence of both `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`. Remove those variables from the root `.env`—empty entries still count as present for this test—when an offline test run is intended.
 
@@ -268,7 +300,7 @@ The real OpenRouter integration test is opt-in by the presence of both `OPENROUT
 - serialized ML access and bounded retry behavior for transient overload;
 - upload body/read deadlines, UUID temp paths, `0600` files, filename sanitization and `ffprobe` validation;
 - duration, resolution, frame-count, worker and job-time limits around FFmpeg;
-- bounded ML/OpenRouter response bodies and strict append-only LLM output validation;
+- bounded ML/OpenRouter response bodies, strict schema/sequence validation, and literal fallback;
 - non-root, read-only container runtime with dropped capabilities and bounded temporary storage;
 - panic recovery, HTTP server timeouts, structured logs, graceful HTTP shutdown and automatic cleanup of completed in-memory jobs after 24 hours.
 
@@ -290,6 +322,6 @@ The real OpenRouter integration test is opt-in by the presence of both `OPENROUT
 - Jobs and transcript state are in memory. A backend restart loses job status/results, and per-process limits are not shared across replicas.
 - `http.Server.Shutdown` does not drain upgraded WebSockets or detached upload workers; deployments interrupt active live sessions and jobs.
 - The global ML slot and single upload worker intentionally favor stability over throughput. Busy instances return `429`/`503`.
-- OpenRouter cleanup cannot repair an incorrectly recognized gesture; an empty model delta falls back to the accepted literal gesture.
+- OpenRouter formatting cannot repair an incorrectly recognized gesture; failed live segments commit their accepted raw literals.
 
 This repository does not currently include a license file; reuse terms are therefore not yet defined.
