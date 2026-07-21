@@ -52,7 +52,13 @@ definitions:
     type: object
   api.WebSocketMessage:
     properties:
+      confidence:
+        type: number
+      full_text:
+        type: string
       text:
+        type: string
+      type:
         type: string
     type: object
 host: localhost:8080
@@ -138,7 +144,10 @@ paths:
         The server sends back JSON text messages with the structure:
         ```json
         {
-        "text": "extracted or processed text from the frames"
+        "type": "transcript",
+        "text": "append-only delta",
+        "full_text": "authoritative transcript snapshot",
+        "confidence": 0.91
         }
         ```
 
@@ -223,7 +232,8 @@ paths:
         name: video
         required: true
         type: file
-      - description: 'Frame extraction interval (default: 1, extract every frame)'
+      - description: 'Minimum frame extraction interval (default: 1; automatically
+          increased to keep extraction bounded)'
         in: formData
         name: interval
         type: integer
@@ -241,8 +251,32 @@ paths:
             additionalProperties:
               type: string
             type: object
+        "413":
+          description: Video exceeds 100 MiB
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "415":
+          description: Unsupported or invalid video
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "429":
+          description: Video processor is busy
+          schema:
+            additionalProperties:
+              type: string
+            type: object
         "500":
           description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "503":
+          description: Upload capacity exhausted
           schema:
             additionalProperties:
               type: string

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -62,7 +63,7 @@ func (jm *JobManager) CreateJob(id, filename string) *VideoJob {
 	}
 
 	jm.jobs[id] = job
-	return job
+	return cloneVideoJob(job)
 }
 
 // GetJob retrieves a job by ID
@@ -71,7 +72,10 @@ func (jm *JobManager) GetJob(id string) (*VideoJob, bool) {
 	defer jm.mu.RUnlock()
 
 	job, exists := jm.jobs[id]
-	return job, exists
+	if !exists {
+		return nil, false
+	}
+	return cloneVideoJob(job), true
 }
 
 // UpdateJob updates a job's status and information
@@ -131,6 +135,21 @@ func (jm *JobManager) CleanupOldJobs(maxAge time.Duration) {
 	}
 }
 
+// RunCleanup bounds in-memory job history for the lifetime of the process.
+func (jm *JobManager) RunCleanup(ctx context.Context, interval, maxAge time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			jm.CleanupOldJobs(maxAge)
+		}
+	}
+}
+
 // GetAllJobs returns all jobs (for debugging)
 func (jm *JobManager) GetAllJobs() map[string]*VideoJob {
 	jm.mu.RLock()
@@ -138,7 +157,27 @@ func (jm *JobManager) GetAllJobs() map[string]*VideoJob {
 
 	jobs := make(map[string]*VideoJob, len(jm.jobs))
 	for id, job := range jm.jobs {
-		jobs[id] = job
+		jobs[id] = cloneVideoJob(job)
 	}
 	return jobs
+}
+
+func cloneVideoJob(job *VideoJob) *VideoJob {
+	if job == nil {
+		return nil
+	}
+
+	cloned := *job
+	cloned.Transcription = append([]string(nil), job.Transcription...)
+	if job.VideoInfo != nil {
+		cloned.VideoInfo = make(map[string]interface{}, len(job.VideoInfo))
+		for key, value := range job.VideoInfo {
+			cloned.VideoInfo[key] = value
+		}
+	}
+	if job.CompletedAt != nil {
+		completedAt := *job.CompletedAt
+		cloned.CompletedAt = &completedAt
+	}
+	return &cloned
 }

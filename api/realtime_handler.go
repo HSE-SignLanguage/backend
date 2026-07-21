@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"streaming/config"
@@ -17,23 +18,41 @@ import (
 )
 
 const (
-	maxContextChars = 1000
+	frameWindowSize        = 32
+	frameWindowStride      = 16
+	frameBatchQueueSize    = 1
+	stableLiteralQueueSize = 8
+	maxContextRunes        = 1000
+	maxWebSocketFrameSize  = 512 << 10
+	webSocketWriteTimeout  = 5 * time.Second
+	webSocketIdleTimeout   = 45 * time.Second
+	maxConcurrentSockets   = 8
+	maxSocketsPerIP        = 2
+	maxFramesPerSecond     = 45
+	maxBytesPerSecond      = 4 << 20
+	maxProtocolViolations  = 3
+	maxConcurrentMLCalls   = 1
 )
 
 type HandlersConfig struct {
-	log           *logger.MultiLogger
-	demoAPIURL    string
-	jobManager    *JobManager
-	useMock       bool
-	mlClient      *mlclient.Client
-	useOpenRouter bool
+	log            *logger.MultiLogger
+	jobManager     *JobManager
+	useMock        bool
+	mlClient       *mlclient.Client
+	useOpenRouter  bool
+	jobSlots       chan struct{}
+	uploadSlots    chan struct{}
+	mlSlots        chan struct{}
+	webSocketSlots chan struct{}
+	webSocketMu    sync.Mutex
+	webSocketsByIP map[string]int
 }
 
 func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
 	mlAPIURL, err := config.GetEnv("ML_API_URL")
 	if err != nil {
 		log.Warn("ML_API_URL not set, using default", "error", err)
-		mlAPIURL = "http://localhost:8080/process"
+		mlAPIURL = "http://localhost:8085/process"
 	}
 
 	useMock := false
@@ -60,18 +79,28 @@ func NewHandlersConfig(log *logger.MultiLogger) *HandlersConfig {
 		log.Fatal("failed to initialise ML API client", "error", err, "url", mlAPIURL)
 	}
 
+	jobManager := NewJobManager()
+	go jobManager.RunCleanup(context.Background(), time.Hour, 24*time.Hour)
+
 	return &HandlersConfig{
-		log:           log,
-		demoAPIURL:    mlAPIURL,
-		jobManager:    NewJobManager(),
-		useMock:       useMock,
-		mlClient:      client,
-		useOpenRouter: useOpenRouter,
+		log:            log,
+		jobManager:     jobManager,
+		useMock:        useMock,
+		mlClient:       client,
+		useOpenRouter:  useOpenRouter,
+		jobSlots:       make(chan struct{}, maxConcurrentVideoJobs),
+		uploadSlots:    make(chan struct{}, maxConcurrentUploads),
+		mlSlots:        make(chan struct{}, maxConcurrentMLCalls),
+		webSocketSlots: make(chan struct{}, maxConcurrentSockets),
+		webSocketsByIP: make(map[string]int),
 	}
 }
 
 type WebSocketMessage struct {
-	Text string `json:"text"`
+	Type       string  `json:"type"`
+	Text       string  `json:"text"`
+	FullText   string  `json:"full_text"`
+	Confidence float64 `json:"confidence"`
 }
 
 // HealthCheck godoc
@@ -100,7 +129,10 @@ func (hc *HandlersConfig) HealthCheck(w http.ResponseWriter, r *http.Request) {
 // @Description The server sends back JSON text messages with the structure:
 // @Description ```json
 // @Description {
-// @Description   "text": "extracted or processed text from the frames"
+// @Description   "type": "transcript",
+// @Description   "text": "append-only delta",
+// @Description   "full_text": "authoritative transcript snapshot",
+// @Description   "confidence": 0.91
 // @Description }
 // @Description ```
 // @Description
@@ -124,16 +156,21 @@ func (hc *HandlersConfig) HealthCheck(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {string} string "Bad Request - Failed to accept websocket"
 // @Router /socket [get]
 func (hc *HandlersConfig) VideoSocketHandler(w http.ResponseWriter, r *http.Request) {
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
-	})
+	clientIP := requestClientIP(r)
+	if !hc.tryAcquireWebSocketSlot(clientIP) {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "websocket capacity exhausted", http.StatusServiceUnavailable)
+		return
+	}
+	defer hc.releaseWebSocketSlot(clientIP)
+
+	c, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		hc.log.Error("failed to accept websocket", "error", err)
-		http.Error(w, "failed to accept websocket", http.StatusBadRequest)
 		return
 	}
 
-	c.SetReadLimit(10 * 1024 * 1024)
+	c.SetReadLimit(maxWebSocketFrameSize)
 
 	hc.log.Info("Client connected to video socket")
 	defer func() {
@@ -141,24 +178,94 @@ func (hc *HandlersConfig) VideoSocketHandler(w http.ResponseWriter, r *http.Requ
 		hc.log.Info("Client disconnected from video socket")
 	}()
 
-	hc.handleFrameStream(r.Context(), c)
+	// The request context is not reliable after an HTTP connection is hijacked.
+	// The session is instead cancelled when the WebSocket read loop exits.
+	ctx, cancel := context.WithCancel(context.Background())
+	batchQueue := make(chan [][]byte, frameBatchQueueSize)
+	workerDone := make(chan struct{})
+
+	go func() {
+		defer close(workerDone)
+		hc.processFrameBatches(ctx, c, batchQueue)
+	}()
+
+	hc.handleFrameStream(ctx, c, batchQueue)
+	cancel()
+	close(batchQueue)
+	<-workerDone
 }
 
-func (hc *HandlersConfig) handleFrameStream(ctx context.Context, c *websocket.Conn) {
-	framesBuffer := make([][]byte, 0, 32)
-	var writeMu sync.Mutex
-	transcriptContext := ""
+func (hc *HandlersConfig) tryAcquireWebSocketSlot(clientIP string) bool {
+	select {
+	case hc.webSocketSlots <- struct{}{}:
+	default:
+		return false
+	}
+
+	hc.webSocketMu.Lock()
+	defer hc.webSocketMu.Unlock()
+	if hc.webSocketsByIP == nil {
+		hc.webSocketsByIP = make(map[string]int)
+	}
+	if hc.webSocketsByIP[clientIP] >= maxSocketsPerIP {
+		<-hc.webSocketSlots
+		return false
+	}
+	hc.webSocketsByIP[clientIP]++
+	return true
+}
+
+func (hc *HandlersConfig) releaseWebSocketSlot(clientIP string) {
+	hc.webSocketMu.Lock()
+	if hc.webSocketsByIP[clientIP] <= 1 {
+		delete(hc.webSocketsByIP, clientIP)
+	} else {
+		hc.webSocketsByIP[clientIP]--
+	}
+	hc.webSocketMu.Unlock()
+	<-hc.webSocketSlots
+}
+
+func requestClientIP(r *http.Request) string {
+	if address, ok := parseRemoteIP(r.RemoteAddr); ok {
+		return address.String()
+	}
+	return "unknown"
+}
+
+func (hc *HandlersConfig) handleFrameStream(ctx context.Context, c *websocket.Conn, batchQueue chan [][]byte) {
+	framesBuffer := make([][]byte, 0, frameWindowSize)
+	rateWindowStarted := time.Now()
+	framesInWindow := 0
+	bytesInWindow := 0
+	protocolViolations := 0
 
 	for {
-		typ, data, err := c.Read(ctx)
-
+		readCtx, cancelRead := context.WithTimeout(ctx, webSocketIdleTimeout)
+		typ, data, err := c.Read(readCtx)
+		cancelRead()
 		if err != nil {
-			hc.log.Error("error reading from websocket", "error", err)
-			break
+			if errors.Is(err, context.DeadlineExceeded) {
+				hc.log.Info("closing idle websocket")
+				_ = c.Close(websocket.StatusPolicyViolation, "idle timeout")
+				return
+			}
+			status := websocket.CloseStatus(err)
+			if status == websocket.StatusNormalClosure || status == websocket.StatusGoingAway {
+				hc.log.Debug("websocket closed by client", "status", status)
+			} else {
+				hc.log.Warn("error reading from websocket", "error", err)
+			}
+			return
 		}
 
 		if typ != websocket.MessageBinary {
-			hc.log.Warn("received non-binary message, skipping")
+			protocolViolations++
+			if protocolViolations >= maxProtocolViolations {
+				hc.log.Warn("closing websocket after repeated non-binary messages")
+				_ = c.Close(websocket.StatusUnsupportedData, "binary video frames required")
+				return
+			}
 			continue
 		}
 
@@ -166,125 +273,192 @@ func (hc *HandlersConfig) handleFrameStream(ctx context.Context, c *websocket.Co
 			continue
 		}
 
-		hc.log.Info("received frame", "size", len(data))
+		now := time.Now()
+		if now.Sub(rateWindowStarted) >= time.Second {
+			rateWindowStarted = now
+			framesInWindow = 0
+			bytesInWindow = 0
+		}
+		framesInWindow++
+		bytesInWindow += len(data)
+		if framesInWindow > maxFramesPerSecond || bytesInWindow > maxBytesPerSecond {
+			hc.log.Warn("closing websocket that exceeded frame rate", "frames", framesInWindow, "bytes", bytesInWindow)
+			_ = c.Close(websocket.StatusPolicyViolation, "video frame rate exceeded")
+			return
+		}
 
 		framesBuffer = append(framesBuffer, data)
-		if len(framesBuffer) >= 32 {
-			framesToSend := make([][]byte, 32)
-			copy(framesToSend, framesBuffer[:32])
-			framesBuffer = framesBuffer[32:]
+		if len(framesBuffer) >= frameWindowSize {
+			framesToSend := make([][]byte, frameWindowSize)
+			copy(framesToSend, framesBuffer[:frameWindowSize])
+			framesBuffer = framesBuffer[frameWindowStride:]
 
-			go hc.sendFramesToAPI(ctx, framesToSend, c, &writeMu, &transcriptContext)
+			if offerLatestBatch(batchQueue, framesToSend) {
+				hc.log.Debug("dropped stale frame batch")
+			}
 		}
 	}
 }
 
-func (hc *HandlersConfig) sendFramesToAPI(ctx context.Context, frames [][]byte, c *websocket.Conn, writeMu *sync.Mutex, transcriptContext *string) {
-	hc.log.Info("sending batch of frames to API", "count", len(frames), "url", hc.demoAPIURL)
-
-	mockText := fmt.Sprintf("new literal text chunk %d", time.Now().Unix())
-	literalText, err := hc.requestLiteralText(ctx, frames, mockText)
-	if err != nil {
-		hc.log.Error("failed to get literal from demo API", "error", err)
-		return
+func offerLatestBatch(queue chan [][]byte, batch [][]byte) bool {
+	select {
+	case queue <- batch:
+		return false
+	default:
 	}
 
-	literalText = strings.TrimSpace(literalText)
-	if literalText == "" {
-		hc.log.Warn("API returned empty text")
-		return
+	dropped := false
+	select {
+	case <-queue:
+		dropped = true
+	default:
 	}
 
-	if shouldSkipLiteral(literalText) {
-		hc.log.Info("literal text indicates no update, skipping send")
-		return
+	select {
+	case queue <- batch:
+	default:
 	}
-
-	previousTranscript := *transcriptContext
-	trimmedContext := hc.trimContext(previousTranscript, maxContextChars)
-
-	updatedTranscript, newSegment, err := hc.updateTranscriptWithContext(trimmedContext, literalText)
-	if err != nil {
-		hc.log.Error("failed to update transcript", "error", err)
-		newSegment = strings.TrimSpace(literalText)
-		updatedTranscript = combineTranscript(trimmedContext, newSegment)
-	}
-
-	if strings.TrimSpace(newSegment) == "" {
-		hc.log.Debug("no new transcript segment to send")
-		return
-	}
-
-	*transcriptContext = updatedTranscript
-
-	response := WebSocketMessage{Text: newSegment}
-	if err := hc.sendTextToClient(ctx, c, writeMu, response); err != nil {
-		hc.log.Error("failed to send text to websocket client", "error", err)
-	}
-
-	hc.log.Info("successfully processed and sent transcript segment", "segment_length", len(newSegment))
+	return dropped
 }
 
-func (hc *HandlersConfig) trimContext(context string, maxChars int) string {
-	if len(context) <= maxChars {
-		return context
+func (hc *HandlersConfig) processFrameBatches(ctx context.Context, c *websocket.Conn, batchQueue <-chan [][]byte) {
+	var stabilizer predictionStabilizer
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	literalQueue := make(chan mlclient.Prediction, stableLiteralQueueSize)
+	transcriptDone := make(chan struct{})
+
+	go func() {
+		defer close(transcriptDone)
+		hc.processStablePredictions(workerCtx, c, literalQueue)
+		cancelWorker()
+	}()
+
+	defer func() {
+		cancelWorker()
+		close(literalQueue)
+		<-transcriptDone
+	}()
+
+	for {
+		select {
+		case <-workerCtx.Done():
+			return
+		case frames, ok := <-batchQueue:
+			if !ok {
+				return
+			}
+
+			prediction, err := hc.requestPrediction(workerCtx, frames, "mock sign")
+			if err != nil {
+				stabilizer.OnError()
+				hc.log.Error("failed to get prediction from ML API", "error", err)
+				continue
+			}
+
+			stablePrediction, stable := stabilizer.Observe(prediction)
+			if !stable {
+				continue
+			}
+
+			select {
+			case literalQueue <- stablePrediction:
+			case <-workerCtx.Done():
+				return
+			}
+		}
 	}
-	return context[len(context)-maxChars:]
 }
 
-func (hc *HandlersConfig) updateTranscriptWithContext(context, newLiteral string) (string, string, error) {
-	context = strings.TrimSpace(context)
+// processStablePredictions keeps slow OpenRouter requests and WebSocket writes
+// out of the ML inference loop. Stable literals are processed in order through
+// a small bounded queue while the frame queue continues to discard stale video.
+func (hc *HandlersConfig) processStablePredictions(ctx context.Context, c *websocket.Conn, literalQueue <-chan mlclient.Prediction) {
+	fullTranscript := ""
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case stablePrediction, ok := <-literalQueue:
+			if !ok {
+				return
+			}
+
+			updatedTranscript, delta, err := hc.updateTranscriptWithContext(ctx, fullTranscript, stablePrediction.Text)
+			if err != nil {
+				hc.log.Warn("failed to improve transcript, using literal text", "error", err)
+				delta = strings.TrimSpace(stablePrediction.Text)
+				updatedTranscript = combineTranscript(fullTranscript, delta)
+			}
+			if delta == "" {
+				continue
+			}
+
+			fullTranscript = updatedTranscript
+			response := WebSocketMessage{
+				Type:       "transcript",
+				Text:       delta,
+				FullText:   fullTranscript,
+				Confidence: stablePrediction.Confidence,
+			}
+			if err := hc.sendTextToClient(ctx, c, response); err != nil {
+				hc.log.Warn("failed to send text to websocket client", "error", err)
+				_ = c.Close(websocket.StatusInternalError, "failed to send transcript")
+				return
+			}
+
+			hc.log.Info("sent stable transcript segment", "segment_length", len(delta), "confidence", stablePrediction.Confidence)
+		}
+	}
+}
+
+func (hc *HandlersConfig) updateTranscriptWithContext(ctx context.Context, fullTranscript, newLiteral string) (string, string, error) {
+	fullTranscript = strings.TrimSpace(fullTranscript)
 	chunk := strings.TrimSpace(newLiteral)
 
 	if chunk == "" {
-		return context, "", nil
+		return fullTranscript, "", nil
 	}
 
 	if hc.useMock {
-		if context == "" {
-			chunk = "Mock transcript: " + chunk
-		}
-		return combineTranscript(context, chunk), chunk, nil
+		return combineTranscript(fullTranscript, chunk), chunk, nil
 	}
 
 	if !hc.useOpenRouter {
-		return combineTranscript(context, chunk), chunk, nil
+		return combineTranscript(fullTranscript, chunk), chunk, nil
 	}
 
-	fullTranscript, err := utils.UpdateTranscript(context, newLiteral)
+	contextWindow := trimContext(fullTranscript, maxContextRunes)
+	update, err := utils.UpdateTranscript(ctx, contextWindow, chunk)
 	if err != nil {
 		return "", "", err
 	}
-
-	fullTranscript = strings.TrimSpace(fullTranscript)
-	if fullTranscript == "" {
-		return context, "", nil
+	if update.Delta == "" {
+		return fullTranscript, "", nil
 	}
 
-	newSegment := extractNewSegment(context, fullTranscript)
-	return fullTranscript, newSegment, nil
+	return combineTranscript(fullTranscript, update.Delta), update.Delta, nil
 }
 
-func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Conn, writeMu *sync.Mutex, message WebSocketMessage) error {
-	writeMu.Lock()
-	defer writeMu.Unlock()
-
+func (hc *HandlersConfig) sendTextToClient(ctx context.Context, c *websocket.Conn, message WebSocketMessage) error {
 	data, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
 
-	return c.Write(ctx, websocket.MessageText, data)
+	writeCtx, cancel := context.WithTimeout(ctx, webSocketWriteTimeout)
+	defer cancel()
+	return c.Write(writeCtx, websocket.MessageText, data)
 }
 
-func (hc *HandlersConfig) requestLiteralText(ctx context.Context, frames [][]byte, mockText string) (string, error) {
+func (hc *HandlersConfig) requestPrediction(ctx context.Context, frames [][]byte, mockText string) (mlclient.Prediction, error) {
 	if len(frames) == 0 {
-		return "", fmt.Errorf("no frames to send to ML API")
+		return mlclient.Prediction{}, fmt.Errorf("no frames to send to ML API")
 	}
 
 	if hc.useMock {
 		hc.log.Debug("using mock literal text")
-		return mockText, nil
+		return mlclient.Prediction{Text: mockText, Confidence: 1, Accepted: true}, nil
 	}
 
 	if ctx == nil {
@@ -292,14 +466,37 @@ func (hc *HandlersConfig) requestLiteralText(ctx context.Context, frames [][]byt
 	}
 
 	if hc.mlClient == nil {
-		return "", fmt.Errorf("ml client is not configured")
+		return mlclient.Prediction{}, fmt.Errorf("ml client is not configured")
 	}
 
-	text, err := hc.mlClient.ProcessFrames(ctx, frames)
+	if !hc.acquireMLSlot(ctx) {
+		return mlclient.Prediction{}, ctx.Err()
+	}
+	defer hc.releaseMLSlot()
+
+	prediction, err := hc.mlClient.ProcessFrames(ctx, frames)
 	if err != nil {
-		return "", fmt.Errorf("call ml api: %w", err)
+		return mlclient.Prediction{}, fmt.Errorf("call ml api: %w", err)
 	}
 
-	hc.log.Info("received literal text from ML API", "text_length", len(text))
-	return text, nil
+	hc.log.Debug("received prediction from ML API", "accepted", prediction.Accepted, "confidence", prediction.Confidence)
+	return prediction, nil
+}
+
+func (hc *HandlersConfig) acquireMLSlot(ctx context.Context) bool {
+	if hc.mlSlots == nil {
+		return true
+	}
+	select {
+	case hc.mlSlots <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (hc *HandlersConfig) releaseMLSlot() {
+	if hc.mlSlots != nil {
+		<-hc.mlSlots
+	}
 }

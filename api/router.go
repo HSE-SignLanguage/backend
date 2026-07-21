@@ -15,12 +15,12 @@ func NewRouter(log *logger.MultiLogger) *chi.Mux {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.RealIP)
+	r.Use(trustedRealIPMiddleware(log))
 	r.Use(middleware.Logger)
 	r.Use(httprate.Limit(
 		20,
 		5*time.Second,
-		httprate.WithKeyFuncs(httprate.KeyByIP, httprate.KeyByEndpoint),
+		httprate.WithKeyFuncs(httprate.KeyByIP),
 	))
 
 	r.Get("/swagger/*", httpSwagger.Handler(
@@ -34,7 +34,6 @@ func NewRouter(log *logger.MultiLogger) *chi.Mux {
 	r.Get("/socket", handlers.VideoSocketHandler)
 	r.Post("/upload", handlers.VideoUploadHandler)
 	r.Get("/job/{id}", handlers.GetJobStatus)
-	r.Get("/jobs", handlers.ListJobs)
 
 	return r
 }
