@@ -84,7 +84,7 @@ const docTemplate = `{
         },
         "/socket": {
             "get": {
-                "description": "Establishes a WebSocket connection for receiving video frames. Send binary frames to the server, and receive text responses back.\n\n**Client Flow:**\n1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)\n2. Send video frames as binary messages (MessageBinary)\n3. Server buffers frames and sends batches of 32 to processing API\n4. Receive text responses as JSON messages (MessageText)\n\n**Response Format:**\nThe server sends back JSON text messages with the structure:\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"text\": \"extracted or processed text from the frames\"\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\nconst ws = new WebSocket('ws://localhost:8080/socket');\n\n// Send binary frame data\nws.send(frameDataBlob);\n\n// Receive text messages\nws.onmessage = (event) =\u003e {\nconst data = JSON.parse(event.data);\nconsole.log('Received text:', data.text);\n};\n` + "`" + `` + "`" + `` + "`" + `",
+                "description": "Establishes a WebSocket connection for receiving video frames. Send binary frames to the server, and receive text responses back.\n\n**Client Flow:**\n1. Connect to the WebSocket endpoint (ws://localhost:8080/socket)\n2. Send video frames as binary messages (MessageBinary)\n3. Server buffers frames and sends batches of 32 to processing API\n4. Receive text responses as JSON messages (MessageText)\n\n**Response Format:**\nThe server sends back JSON text messages with the structure:\n` + "`" + `` + "`" + `` + "`" + `json\n{\n\"type\": \"transcript\",\n\"text\": \"append-only delta\",\n\"full_text\": \"authoritative transcript snapshot\",\n\"confidence\": 0.91\n}\n` + "`" + `` + "`" + `` + "`" + `\n\n**Frontend Example:**\n` + "`" + `` + "`" + `` + "`" + `javascript\nconst ws = new WebSocket('ws://localhost:8080/socket');\n\n// Send binary frame data\nws.send(frameDataBlob);\n\n// Receive text messages\nws.onmessage = (event) =\u003e {\nconst data = JSON.parse(event.data);\nconsole.log('Received text:', data.text);\n};\n` + "`" + `` + "`" + `` + "`" + `",
                 "consumes": [
                     "application/octet-stream"
                 ],
@@ -134,7 +134,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "integer",
-                        "description": "Frame extraction interval (default: 1, extract every frame)",
+                        "description": "Minimum frame extraction interval (default: 1; automatically increased to keep extraction bounded)",
                         "name": "interval",
                         "in": "formData"
                     }
@@ -156,8 +156,44 @@ const docTemplate = `{
                             }
                         }
                     },
+                    "413": {
+                        "description": "Video exceeds 100 MiB",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "415": {
+                        "description": "Unsupported or invalid video",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Video processor is busy",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "Upload capacity exhausted",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -244,7 +280,16 @@ const docTemplate = `{
         "api.WebSocketMessage": {
             "type": "object",
             "properties": {
+                "confidence": {
+                    "type": "number"
+                },
+                "full_text": {
+                    "type": "string"
+                },
                 "text": {
+                    "type": "string"
+                },
+                "type": {
                     "type": "string"
                 }
             }

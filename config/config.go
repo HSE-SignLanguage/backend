@@ -40,13 +40,14 @@ func GetConfig() *Config {
 	}
 
 	port := GetEnvInt("BACKEND_PORT")
-	if port == 0 {
+	if port < 1 || port > 65535 {
 		log.Fatalf("BACKEND_PORT not set or invalid")
 	}
 
 	swaggerHost, err := GetEnv("SWAGGER_BASE_URL")
 	if err != nil {
-		log.Fatalf("SWAGGER_BASE_URL not set: %s", err)
+		swaggerHost = fmt.Sprintf("localhost:%d", port)
+		log.Printf("SWAGGER_BASE_URL not set, using %s", swaggerHost)
 	}
 
 	return &Config{

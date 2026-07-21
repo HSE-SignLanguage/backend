@@ -3,17 +3,31 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"streaming/utils"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+)
+
+const (
+	maxUploadFileBytes     int64 = 100 << 20
+	maxUploadBodyBytes           = maxUploadFileBytes + (1 << 20)
+	multipartMemoryBytes         = 8 << 20
+	maxConcurrentUploads         = 2
+	maxConcurrentVideoJobs       = 1
+	maxFrameInterval             = 120
+	maxUploadReadTime            = 3 * time.Minute
+	maxJobProcessingTime         = 15 * time.Minute
 )
 
 // VideoUploadHandler godoc
@@ -65,17 +79,45 @@ import (
 // @Accept multipart/form-data
 // @Produce json
 // @Param video formData file true "Video file to process"
-// @Param interval formData int false "Frame extraction interval (default: 1, extract every frame)"
+// @Param interval formData int false "Minimum frame extraction interval (default: 1; automatically increased to keep extraction bounded)"
 // @Success 202 {object} map[string]interface{} "Job created and processing started"
 // @Failure 400 {object} map[string]string "Bad Request - Invalid file or format"
+// @Failure 413 {object} map[string]string "Video exceeds 100 MiB"
+// @Failure 415 {object} map[string]string "Unsupported or invalid video"
+// @Failure 429 {object} map[string]string "Video processor is busy"
+// @Failure 503 {object} map[string]string "Upload capacity exhausted"
 // @Failure 500 {object} map[string]string "Internal Server Error"
 // @Router /upload [post]
 func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(100 << 20); err != nil {
-		hc.log.Error("failed to parse multipart form", "error", err, "content_type", r.Header.Get("Content-Type"))
-		http.Error(w, fmt.Sprintf("failed to parse multipart form: %v. Ensure Content-Type is multipart/form-data with boundary", err), http.StatusBadRequest)
+	if !hc.tryAcquireUploadSlot() {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "upload capacity exhausted, retry later", http.StatusServiceUnavailable)
 		return
 	}
+	defer hc.releaseUploadSlot()
+
+	responseController := http.NewResponseController(w)
+	if err := responseController.SetReadDeadline(time.Now().Add(maxUploadReadTime)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		hc.log.Warn("failed to set upload read deadline", "error", err)
+	}
+	defer responseController.SetReadDeadline(time.Time{})
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBodyBytes)
+	if err := r.ParseMultipartForm(multipartMemoryBytes); err != nil {
+		hc.log.Error("failed to parse multipart form", "error", err, "content_type", r.Header.Get("Content-Type"))
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			http.Error(w, "video upload exceeds 100 MiB", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if os.IsTimeout(err) {
+			http.Error(w, "video upload timed out", http.StatusRequestTimeout)
+			return
+		}
+		http.Error(w, "invalid multipart video upload", http.StatusBadRequest)
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
 
 	file, header, err := r.FormFile("video")
 	if err != nil {
@@ -84,11 +126,27 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	defer file.Close()
+	if header.Size > maxUploadFileBytes {
+		http.Error(w, "video upload exceeds 100 MiB", http.StatusRequestEntityTooLarge)
+		return
+	}
 
-	hc.log.Info("received video upload", "filename", header.Filename, "size", header.Size)
+	filename := sanitizeFilename(header.Filename)
+
+	hc.log.Info("received video upload", "filename", filename, "size", header.Size)
+
+	interval := 1
+	if intervalStr := r.FormValue("interval"); intervalStr != "" {
+		parsedInterval, err := strconv.Atoi(intervalStr)
+		if err != nil || parsedInterval < 1 || parsedInterval > maxFrameInterval {
+			http.Error(w, "interval must be an integer between 1 and 120", http.StatusBadRequest)
+			return
+		}
+		interval = parsedInterval
+	}
 
 	tempDir := filepath.Join("tmp", "uploads")
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
+	if err := os.MkdirAll(tempDir, 0700); err != nil {
 		hc.log.Error("failed to create temp directory", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
@@ -98,35 +156,60 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 	jobID := uuid.New().String()
 
 	// Save file with job ID
-	tempFilePath := filepath.Join(tempDir, fmt.Sprintf("%s_%s", jobID, header.Filename))
-	tempFile, err := os.Create(tempFilePath)
+	tempFilePath := filepath.Join(tempDir, jobID+".upload")
+	tempFile, err := os.OpenFile(tempFilePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		hc.log.Error("failed to create temp file", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	if _, err := io.Copy(tempFile, file); err != nil {
-		tempFile.Close()
+	written, copyErr := io.Copy(tempFile, io.LimitReader(file, maxUploadFileBytes+1))
+	closeErr := tempFile.Close()
+	if copyErr != nil || closeErr != nil {
 		os.Remove(tempFilePath)
-		hc.log.Error("failed to save temp file", "error", err)
+		hc.log.Error("failed to save temp file", "copy_error", copyErr, "close_error", closeErr)
 		http.Error(w, "failed to save video", http.StatusInternalServerError)
 		return
 	}
-	tempFile.Close()
-
-	// Create job
-	job := hc.jobManager.CreateJob(jobID, header.Filename)
-	hc.log.Info("created job", "job_id", jobID, "filename", header.Filename, "status", job.Status)
-
-	// Get interval parameter
-	interval := 1
-	if intervalStr := r.FormValue("interval"); intervalStr != "" {
-		fmt.Sscanf(intervalStr, "%d", &interval)
+	if written > maxUploadFileBytes {
+		os.Remove(tempFilePath)
+		http.Error(w, "video upload exceeds 100 MiB", http.StatusRequestEntityTooLarge)
+		return
 	}
 
+	// ffprobe is the source of truth for supported containers and video
+	// streams. MIME sniffing rejects valid MOV files and can accept a forged
+	// signature without proving the payload is actually decodable.
+	extractor, err := utils.NewVideoFrameExtractor(tempFilePath)
+	if err != nil {
+		os.Remove(tempFilePath)
+		hc.log.Warn("rejected uploaded video", "filename", filename, "error", err)
+		http.Error(w, "unsupported or invalid video", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	if !hc.tryAcquireJobSlot() {
+		extractor.Close()
+		os.Remove(tempFilePath)
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "video processor is busy, retry later", http.StatusTooManyRequests)
+		return
+	}
+	slotTransferred := false
+	defer func() {
+		if !slotTransferred {
+			hc.releaseJobSlot()
+		}
+	}()
+
+	// Create job
+	job := hc.jobManager.CreateJob(jobID, filename)
+	hc.log.Info("created job", "job_id", jobID, "filename", filename, "status", job.Status)
+
 	// Start async processing
-	go hc.processVideoAsync(jobID, tempFilePath, interval)
+	slotTransferred = true
+	go hc.processVideoAsync(jobID, tempFilePath, interval, extractor)
 
 	// Return immediately with job ID
 	response := map[string]interface{}{
@@ -142,9 +225,61 @@ func (hc *HandlersConfig) VideoUploadHandler(w http.ResponseWriter, r *http.Requ
 	hc.log.Info("video upload accepted", "job_id", jobID)
 }
 
+func (hc *HandlersConfig) tryAcquireJobSlot() bool {
+	select {
+	case hc.jobSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (hc *HandlersConfig) releaseJobSlot() {
+	<-hc.jobSlots
+}
+
+func (hc *HandlersConfig) tryAcquireUploadSlot() bool {
+	select {
+	case hc.uploadSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (hc *HandlersConfig) releaseUploadSlot() {
+	<-hc.uploadSlots
+}
+
+func sanitizeFilename(filename string) string {
+	filename = filepath.Base(strings.ReplaceAll(filename, "\\", "/"))
+	var sanitized strings.Builder
+	for _, r := range filename {
+		if sanitized.Len() >= 128 {
+			break
+		}
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '.' || r == '-' || r == '_' {
+			sanitized.WriteRune(r)
+		} else {
+			sanitized.WriteByte('_')
+		}
+	}
+
+	result := strings.Trim(sanitized.String(), ".")
+	if result == "" {
+		return "video"
+	}
+	return result
+}
+
 // processVideoAsync processes video in the background
-func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval int) {
+func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, requestedInterval int, extractor *utils.VideoFrameExtractor) {
 	defer os.Remove(tempFilePath) // Clean up temp file when done
+	defer hc.releaseJobSlot()
+	defer extractor.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), maxJobProcessingTime)
+	defer cancel()
 
 	hc.log.Info("starting video processing", "job_id", jobID)
 
@@ -153,26 +288,16 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 		job.Status = JobStatusProcessing
 	})
 
-	// Extract frames
-	extractor, err := utils.NewVideoFrameExtractor(tempFilePath)
-	if err != nil {
-		hc.log.Error("failed to create video extractor", "job_id", jobID, "error", err)
-		hc.jobManager.FailJob(jobID, fmt.Sprintf("failed to process video: %v", err))
-		return
-	}
-	defer extractor.Close()
-
 	// Get video info
 	videoInfo := extractor.GetVideoInfo()
+	interval := extractor.EffectiveFrameInterval(requestedInterval)
+	videoInfo["extraction_interval"] = interval
 	hc.log.Info("video info", "job_id", jobID, "info", videoInfo)
 
-	// Extract frames with interval
-	var frames [][]byte
-	if interval > 1 {
-		frames, err = extractor.ExtractFramesWithInterval(interval)
-	} else {
-		frames, err = extractor.ExtractAllFrames()
-	}
+	// Automatically increase the sampling interval for longer/high-FPS videos
+	// so the documented two-minute input limit does not exceed the bounded
+	// extraction budget.
+	frames, err := extractor.ExtractFramesWithInterval(interval)
 
 	if err != nil {
 		hc.log.Error("failed to extract frames", "job_id", jobID, "error", err)
@@ -181,9 +306,14 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 	}
 
 	hc.log.Info("extracted frames", "job_id", jobID, "count", len(frames))
+	if len(frames) == 0 {
+		hc.jobManager.FailJob(jobID, "video contains no decodable frames")
+		return
+	}
 
-	// Split frames into batches
-	batches := utils.BatchFrames(frames, 32)
+	// Use the same overlapping 32/16 windows as realtime recognition. The
+	// final partial window is padded with its last frame.
+	batches := utils.WindowFrames(frames, frameWindowSize, frameWindowStride)
 
 	// Update job with batch info
 	hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
@@ -196,35 +326,47 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 
 	// Process batches with context tracking
 	transcriptContext := ""
+	successfulInferences := 0
+	var stabilizer predictionStabilizer
 	for i, batch := range batches {
+		if err := ctx.Err(); err != nil {
+			hc.jobManager.FailJob(jobID, "video processing timed out")
+			return
+		}
+
 		hc.log.Info("processing batch", "job_id", jobID, "batch_num", i+1, "batch_size", len(batch))
 
 		mockText := fmt.Sprintf("Mock transcription for batch of %d frames. This is test data.", len(batch))
-		literalText, err := hc.requestLiteralText(context.Background(), batch, mockText)
+		prediction, err := hc.requestPrediction(ctx, batch, mockText)
 		if err != nil {
+			stabilizer.OnError()
 			hc.log.Error("failed to send batch to demo API", "job_id", jobID, "batch_num", i+1, "error", err)
 			hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
 				job.FailedBatches++
 				job.ProcessedBatches++
 			})
 		} else {
-			literalText = strings.TrimSpace(literalText)
-			if shouldSkipLiteral(literalText) {
-				hc.log.Info("literal text indicates no update for batch", "job_id", jobID, "batch_num", i+1)
+			successfulInferences++
+			stablePrediction := prediction
+			stable := prediction.Accepted && strings.TrimSpace(prediction.Text) != "" && !shouldSkipLiteral(prediction.Text)
+			if len(batches) > 1 {
+				stablePrediction, stable = stabilizer.Observe(prediction)
+			}
+			if !stable {
+				hc.log.Debug("ML prediction not stable for batch", "job_id", jobID, "batch_num", i+1)
 				hc.jobManager.UpdateJob(jobID, func(job *VideoJob) {
 					job.SuccessfulBatches++
 					job.ProcessedBatches++
 				})
 				continue
 			}
+			literalText := strings.TrimSpace(stablePrediction.Text)
 
-			// Trim context and update with OpenRouter
-			trimmedContext := hc.trimContext(transcriptContext, 1000)
-			updatedTranscript, newSegment, err := hc.updateTranscriptWithContext(trimmedContext, literalText)
+			updatedTranscript, newSegment, err := hc.updateTranscriptWithContext(ctx, transcriptContext, literalText)
 			if err != nil {
 				hc.log.Warn("failed to update transcript, using literal", "job_id", jobID, "error", err)
 				newSegment = strings.TrimSpace(literalText)
-				updatedTranscript = combineTranscript(trimmedContext, newSegment)
+				updatedTranscript = combineTranscript(transcriptContext, newSegment)
 			}
 
 			if strings.TrimSpace(newSegment) == "" {
@@ -246,10 +388,21 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 			hc.jobManager.AddTranscriptionResult(jobID, newSegment)
 		}
 
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			hc.jobManager.FailJob(jobID, "video processing timed out")
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 
-	// Use the final improved context as full text
+	if successfulInferences == 0 && len(batches) > 0 {
+		hc.jobManager.FailJob(jobID, "recognition service was unavailable")
+		return
+	}
+
+	// Use the final improved context as full text. Empty text is valid when the
+	// ML service ran successfully but found no confident signs.
 	hc.jobManager.CompleteJob(jobID, transcriptContext)
 
 	job, _ := hc.jobManager.GetJob(jobID)
@@ -279,46 +432,18 @@ func (hc *HandlersConfig) processVideoAsync(jobID, tempFilePath string, interval
 // @Router /job/{id} [get]
 func (hc *HandlersConfig) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "id")
-	hc.log.Info("getting job status AHHAHAHAHHA", "job_id", jobID)
-
-	// Debug logging - safely access route context
-	rctx := chi.RouteContext(r.Context())
-	var paramKeys, paramValues []string
-	if rctx != nil && rctx.URLParams.Keys != nil {
-		paramKeys = rctx.URLParams.Keys
-		paramValues = rctx.URLParams.Values
-	}
-
-	hc.log.Info("getting job status",
-		"job_id", jobID,
-		"request_path", r.URL.Path,
-		"request_url", r.URL.String(),
-		"param_keys_count", len(paramKeys),
-		"param_values_count", len(paramValues))
 
 	job, exists := hc.jobManager.GetJob(jobID)
 	if !exists {
-		hc.log.Error("job not found", "job_id", jobID, "all_jobs_count", len(hc.jobManager.GetAllJobs()))
+		hc.log.Debug("job not found", "job_id", jobID)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "job not found"})
 		return
 	}
 
-	hc.log.Info("job found", "job_id", jobID, "status", job.Status)
+	hc.log.Debug("job found", "job_id", jobID, "status", job.Status)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(job)
-}
-
-// ListJobs returns all jobs (for debugging)
-func (hc *HandlersConfig) ListJobs(w http.ResponseWriter, r *http.Request) {
-	jobs := hc.jobManager.GetAllJobs()
-	hc.log.Info("listing all jobs", "count", len(jobs))
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"count": len(jobs),
-		"jobs":  jobs,
-	})
 }

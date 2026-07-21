@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,13 +14,13 @@ import (
 )
 
 func TestUpdateTranscriptReturnsCurrentWhenNewLiteralEmpty(t *testing.T) {
-	got, err := utils.UpdateTranscript("  Hello world  ", "   ")
+	got, err := utils.UpdateTranscript(context.Background(), "  Hello world  ", "   ")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	if got != "Hello world" {
-		t.Fatalf("expected existing transcript when literal empty, got %q", got)
+	if got.FullText != "Hello world" || got.Delta != "" {
+		t.Fatalf("expected existing transcript and empty delta, got %#v", got)
 	}
 }
 
@@ -27,13 +28,21 @@ func TestUpdateTranscriptMissingEnv(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "")
 	t.Setenv("OPENROUTER_MODEL", "")
 
-	if _, err := utils.UpdateTranscript("context", "new"); err == nil {
+	if _, err := utils.UpdateTranscript(context.Background(), "context", "new"); err == nil {
 		t.Fatalf("expected error when env vars are missing")
 	}
 }
 
 func TestUpdateTranscriptSuccess(t *testing.T) {
-	expectedResponse := "Updated transcript result."
+	expectedDelta := "обновлённый фрагмент"
+	expectedFullText := "prev context " + expectedDelta
+	structuredContent, err := json.Marshal(utils.TranscriptUpdate{
+		FullText: expectedFullText,
+		Delta:    expectedDelta,
+	})
+	if err != nil {
+		t.Fatalf("failed to encode fixture: %v", err)
+	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -52,6 +61,16 @@ func TestUpdateTranscriptSuccess(t *testing.T) {
 		if payload["model"] != "test-model" {
 			t.Fatalf("expected model test-model, got %v", payload["model"])
 		}
+		if payload["temperature"] != float64(0) {
+			t.Fatalf("expected zero temperature, got %v", payload["temperature"])
+		}
+		if payload["max_tokens"] != float64(256) {
+			t.Fatalf("expected max_tokens 256, got %v", payload["max_tokens"])
+		}
+		provider, ok := payload["provider"].(map[string]any)
+		if !ok || provider["require_parameters"] != true {
+			t.Fatalf("expected provider.require_parameters=true, got %v", payload["provider"])
+		}
 
 		messages, ok := payload["messages"].([]any)
 		if !ok || len(messages) != 2 {
@@ -62,8 +81,9 @@ func TestUpdateTranscriptSuccess(t *testing.T) {
 			"choices": []map[string]any{{
 				"message": map[string]any{
 					"role":    "assistant",
-					"content": expectedResponse,
+					"content": string(structuredContent),
 				},
+				"finish_reason": "stop",
 			}},
 		})
 	}))
@@ -75,13 +95,41 @@ func TestUpdateTranscriptSuccess(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "test-key")
 	t.Setenv("OPENROUTER_MODEL", "test-model")
 
-	result, err := utils.UpdateTranscript("prev context", "new literal chunk")
+	result, err := utils.UpdateTranscript(context.Background(), "prev context", "new literal chunk")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	if result != expectedResponse {
-		t.Fatalf("unexpected transcript result: %q", result)
+	if result.FullText != expectedFullText || result.Delta != expectedDelta {
+		t.Fatalf("unexpected transcript result: %#v", result)
+	}
+}
+
+func TestUpdateTranscriptRejectsNonAppendOnlyResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		content, err := json.Marshal(utils.TranscriptUpdate{
+			FullText: "переписанный старый текст новый фрагмент",
+			Delta:    "новый фрагмент",
+		})
+		if err != nil {
+			t.Fatalf("failed to encode fixture: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]any{"role": "assistant", "content": string(content)},
+				"finish_reason": "stop",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	restore := utils.SetOpenRouterURLForTest(server.URL)
+	defer restore()
+	t.Setenv("OPENROUTER_API_KEY", "test-key")
+	t.Setenv("OPENROUTER_MODEL", "test-model")
+
+	if _, err := utils.UpdateTranscript(context.Background(), "исходный текст", "новый literal"); err == nil {
+		t.Fatal("expected a non-append-only response to be rejected")
 	}
 }
 
@@ -103,14 +151,14 @@ func TestUpdateTranscriptIntegrationOpenRouter(t *testing.T) {
 	fmt.Printf("current context: %q\n", current)
 	fmt.Printf("new literal chunk: %q\n", newChunk)
 
-	result, err := utils.UpdateTranscript(current, newChunk)
+	result, err := utils.UpdateTranscript(context.Background(), current, newChunk)
 	if err != nil {
 		t.Fatalf("OpenRouter request failed: %v", err)
 	}
 
-	if result == "" {
+	if result.FullText == "" {
 		t.Fatalf("expected non-empty transcript result")
 	}
 
-	fmt.Printf("updated transcript: %q\n", result)
+	fmt.Printf("updated transcript: %q\n", result.FullText)
 }

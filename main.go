@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os/signal"
 	"streaming/api"
 	"streaming/config"
 	"streaming/docs"
 	"streaming/logger"
+	"syscall"
+	"time"
 )
 
 // @title Video Streaming API
@@ -25,7 +29,7 @@ import (
 // @schemes http ws
 
 func main() {
-	logger, err := logger.New("main.log")
+	logger, err := logger.New("")
 	if err != nil {
 		fmt.Printf("failed to create logger: %s", err)
 	}
@@ -37,5 +41,15 @@ func main() {
 	router := api.NewRouter(logger)
 	server := api.NewServer(config.Port, logger, router)
 
-	server.Start()
+	go server.Start()
+
+	shutdownSignal, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	<-shutdownSignal.Done()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Stop(shutdownCtx); err != nil {
+		logger.Error("failed to stop server gracefully", "error", err)
+	}
 }

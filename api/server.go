@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"streaming/logger"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -22,16 +24,21 @@ func NewServer(port int, logger *logger.MultiLogger, router *chi.Mux) *Server {
 		log:    logger,
 		Router: router,
 		serv: &http.Server{
-			Addr:    fmt.Sprintf(":%d", port),
-			Handler: router,
+			Addr:              fmt.Sprintf(":%d", port),
+			Handler:           router,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       maxUploadReadTime,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    1 << 20,
 		},
 	}
 }
 
 func (s *Server) Start() {
 	s.log.Info("Starting server", "port", s.Port)
-	err := http.ListenAndServe(fmt.Sprintf(":%d", s.Port), s.Router)
-	if err != nil {
+	err := s.serv.ListenAndServe()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		s.log.Fatal("Server failed to start", "error", err)
 	}
 }
