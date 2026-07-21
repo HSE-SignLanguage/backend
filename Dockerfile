@@ -28,6 +28,7 @@ RUN apk add --no-cache ffmpeg ca-certificates tzdata \
 ARG BACKEND_PORT=8080
 ENV BACKEND_PORT=${BACKEND_PORT}
 ENV TMPDIR=/app/tmp
+ENV XDG_CACHE_HOME=/app/tmp/cache
 
 WORKDIR /app
 
