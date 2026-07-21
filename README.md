@@ -46,9 +46,9 @@ Routes are registered at the service root. The production gateway exposes the AP
 | Job status | `GET /job/{id}` | `GET /api/job/{id}` |
 | Swagger UI | `GET /swagger/index.html` | [`GET /swagger/index.html`](https://hack.eferzo.xyz/swagger/index.html) |
 
-The frontend defaults to same-origin `/api/`. A reverse proxy must preserve WebSocket upgrades for `/api/socket`. Swagger is exposed separately at `/swagger` because the UI loads `/swagger/doc.json`; `SWAGGER_BASE_URL` sets the Swagger `host` only and must not contain a scheme or path.
+The frontend defaults to same-origin `/api/`. A reverse proxy must preserve WebSocket upgrades for `/api/socket`. Swagger is exposed separately at `/swagger` because the UI loads `/swagger/doc.json`; `SWAGGER_BASE_URL` must contain the public API root, including its scheme and any proxy path, for example `https://hack.eferzo.xyz/api`.
 
-The generated Swagger 2.0 document describes the backend's internal root paths (`basePath: /`). It does not encode the external `/api` gateway prefix.
+The generated Swagger 2.0 document derives its `host`, `basePath` and scheme from that public URL, so "Try it out" uses the same route as external clients.
 
 ## API
 
@@ -188,7 +188,7 @@ The process loads `.env` from the working directory when present. Environment va
 | `USE_OPENROUTER` | `true` | Enable conservative external transcript cleanup |
 | `OPENROUTER_API_KEY` | required only when cleanup is enabled | OpenRouter bearer credential; never commit it |
 | `OPENROUTER_MODEL` | required only when cleanup is enabled | Model supporting strict JSON Schema; `.env.example` contains a current example |
-| `SWAGGER_BASE_URL` | `localhost:${BACKEND_PORT}` | Swagger host only, for example `hack.eferzo.xyz` |
+| `SWAGGER_BASE_URL` | `http://localhost:${BACKEND_PORT}` | Public API root used by Swagger, for example `https://hack.eferzo.xyz/api` |
 | `TRUSTED_PROXY_CIDRS` | empty | Comma-separated CIDRs of direct trusted reverse proxies |
 
 `TRUSTED_PROXY_CIDRS` is a security boundary. Forwarded headers are ignored unless the immediate peer is trusted; then the rightmost untrusted `X-Forwarded-For` address is used. `True-Client-IP` and `X-Real-IP` are never trusted. Use the narrow ingress/overlay CIDR that actually reaches the container, not an arbitrary broad private range. Leave it empty when connecting directly in local development.
